@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Build artifacts
+*.dmg
+Breeze
+breeze-helper
+Breeze.app/Contents/MacOS/Breeze
+Breeze.app/Contents/Library/LaunchServices/breeze-helper
+Breeze.app/Contents/MacOS/breeze-helper
+dmg_staging/
+.build/
+Packages/
+*.o
+*.swiftdoc
+*.swiftmodule
+
+# Scratch
+scratch/
+test_*
+smc_*
+temp_*
