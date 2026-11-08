@@ -11,6 +11,7 @@ public enum IconThemeChoice: String, CaseIterable, Identifiable, Sendable {
 
 public final class SettingsViewModel: ObservableObject {
     @Published public var selectedTab: SettingsTab = .profiles
+    public let profileEditorVM = ProfileEditorViewModel()
     @Published public var isInstallingHelper: Bool = false
     @Published public var installMessage: String? = nil
     @Published public var launchAtLogin: Bool = true
@@ -125,7 +126,7 @@ public struct SettingsView: View {
             ZStack(alignment: .topLeading) {
                 switch viewModel.selectedTab {
                 case .profiles:
-                    ProfileEditorView()
+                    ProfileEditorView(viewModel: viewModel.profileEditorVM)
                 case .sensors:
                     sensorsTab
                 case .helper:

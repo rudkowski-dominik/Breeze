@@ -84,6 +84,30 @@ public enum LocalizedKey {
     case profileCustom
     case profileCustomDesc
 
+    // Profile detail & editor
+    case profilesHeader
+    case addCustomProfile
+    case activateProfile
+    case profileActive
+    case systemManagementTitle
+    case systemManagementDesc
+    case maxAirflowTitle
+    case maxAirflowDesc
+    case curveParams
+    case rampStartTemp
+    case maxFanTemp
+    case baseIdleSpeed
+    case targetPeakSpeed
+    case createCustomTitle
+    case profileNameField
+    case startTempField
+    case maxTempField
+    case baseRPMField
+    case maxRPMField
+    case cancel
+    case saveProfile
+    case deleteProfile
+
     // Settings tabs & options
     case tabProfiles
     case tabSensors
@@ -153,6 +177,29 @@ public enum LocalizedKey {
         case .profileCustom: return "Custom"
         case .profileCustomDesc: return "Create your own cooling curves and temperature targets."
 
+        case .profilesHeader: return "PROFILES"
+        case .addCustomProfile: return "Add Custom Profile"
+        case .activateProfile: return "Activate Profile"
+        case .profileActive: return "Active"
+        case .systemManagementTitle: return "Apple Silicon Hardware Management"
+        case .systemManagementDesc: return "In System mode, the Apple Silicon SMC and CLPC (Closed Loop Performance Controller) determine fan speeds dynamically based on hundreds of internal thermal diode matrices."
+        case .maxAirflowTitle: return "Maximum Airflow Override"
+        case .maxAirflowDesc: return "Forces the fan to 100% duty cycle (4900 RPM) for rapid cooling after extreme workloads or benchmark runs."
+        case .curveParams: return "Cooling Curve Parameters"
+        case .rampStartTemp: return "Ramp Start Temp:"
+        case .maxFanTemp: return "Max Fan Speed Temp:"
+        case .baseIdleSpeed: return "Base Idle Speed:"
+        case .targetPeakSpeed: return "Target Peak Speed:"
+        case .createCustomTitle: return "Create Custom Profile"
+        case .profileNameField: return "Profile Name:"
+        case .startTempField: return "Start Temp:"
+        case .maxTempField: return "Max Temp:"
+        case .baseRPMField: return "Base RPM:"
+        case .maxRPMField: return "Max RPM:"
+        case .cancel: return "Cancel"
+        case .saveProfile: return "Save Profile"
+        case .deleteProfile: return "Delete Profile"
+
         case .tabProfiles: return "Profiles"
         case .tabSensors: return "Hardware Sensors"
         case .tabHelper: return "Privileged Helper"
@@ -212,9 +259,32 @@ public enum LocalizedKey {
         case .profileCustom: return "Własny"
         case .profileCustomDesc: return "Twórz własne krzywe chłodzenia i docelowe temperatury."
 
+        case .profilesHeader: return "PROFILE"
+        case .addCustomProfile: return "Dodaj własny profil"
+        case .activateProfile: return "Aktywuj profil"
+        case .profileActive: return "Aktywny"
+        case .systemManagementTitle: return "Sprzętowe zarządzanie Apple Silicon"
+        case .systemManagementDesc: return "W trybie System kontroler Apple SMC i CLPC dynamicznie regulują obroty wentylatora w oparciu o wewnętrzną matrycę diod termicznych procesora."
+        case .maxAirflowTitle: return "Maksymalna wydajność chłodzenia"
+        case .maxAirflowDesc: return "Wymusza maksymalne obroty wentylatora (4900 RPM) dla natychmiastowego schłodzenia po intensywnej pracy lub testach."
+        case .curveParams: return "Parametry krzywej chłodzenia"
+        case .rampStartTemp: return "Temperatura startu:"
+        case .maxFanTemp: return "Temperatura obrotów maks.:"
+        case .baseIdleSpeed: return "Bazowe obroty minimalne:"
+        case .targetPeakSpeed: return "Docelowe obroty maks.:"
+        case .createCustomTitle: return "Nowy profil chłodzenia"
+        case .profileNameField: return "Nazwa profilu:"
+        case .startTempField: return "Temperatura startu:"
+        case .maxTempField: return "Temperatura maks.:"
+        case .baseRPMField: return "Obroty bazowe (RPM):"
+        case .maxRPMField: return "Obroty maksymalne (RPM):"
+        case .cancel: return "Anuluj"
+        case .saveProfile: return "Zapisz profil"
+        case .deleteProfile: return "Usuń profil"
+
         case .tabProfiles: return "Profile"
         case .tabSensors: return "Sensory sprzętowe"
-        case .tabHelper: return "Daemon pomocniczy"
+        case .tabHelper: return "Narzędzie pomocnicze"
         case .tabGeneral: return "Ogólne"
         case .language: return "Język aplikacji"
         case .iconTheme: return "Motyw ikony programu"
@@ -229,10 +299,10 @@ public enum LocalizedKey {
         case .energyDesc: return "Automatycznie wstrzymuje odpytywanie i oddaje kontrolę macOS podczas uśpienia komputera."
         case .failsafeThreshold: return "Próg bezpieczeństwa awaryjnego:"
         case .failsafeDesc: return "W przypadku wzrostu temperatury SoC powyżej 86°C, Breeze natychmiast wymusza 100% chłodzenia."
-        case .helperActive: return "Daemon pomocniczy jest aktywny"
-        case .helperInactive: return "Daemon nie jest zainstalowany lub jest nieaktywny"
-        case .helperInstallBtn: return "Zainstaluj daemona pomocniczego..."
-        case .helperReinstallBtn: return "Zainstaluj ponownie daemona"
+        case .helperActive: return "Narzędzie pomocnicze jest aktywne"
+        case .helperInactive: return "Narzędzie pomocnicze nie jest zainstalowane"
+        case .helperInstallBtn: return "Zainstaluj narzędzie pomocnicze..."
+        case .helperReinstallBtn: return "Zainstaluj ponownie narzędzie"
         }
     }
 
@@ -271,9 +341,32 @@ public enum LocalizedKey {
         case .profileCustom: return "Personalizado"
         case .profileCustomDesc: return "Crea curvas de refrigeración y temperaturas objetivo."
 
+        case .profilesHeader: return "PERFILES"
+        case .addCustomProfile: return "Añadir perfil personalizado"
+        case .activateProfile: return "Activar perfil"
+        case .profileActive: return "Activo"
+        case .systemManagementTitle: return "Gestión de hardware Apple Silicon"
+        case .systemManagementDesc: return "En el modo Sistema, el SMC y el CLPC de Apple Silicon regulan dinámicamente la velocidad según la matriz térmica del procesador."
+        case .maxAirflowTitle: return "Flujo de aire máximo forzado"
+        case .maxAirflowDesc: return "Fuerza el ventilador al 100% de potencia (4900 RPM) para una refrigeración rápida tras cargas extremas."
+        case .curveParams: return "Parámetros de la curva de refrigeración"
+        case .rampStartTemp: return "Temperatura de inicio:"
+        case .maxFanTemp: return "Temperatura velocidad máx.:"
+        case .baseIdleSpeed: return "Velocidad mínima base:"
+        case .targetPeakSpeed: return "Velocidad pico objetivo:"
+        case .createCustomTitle: return "Crear perfil personalizado"
+        case .profileNameField: return "Nombre del perfil:"
+        case .startTempField: return "Temp. inicio:"
+        case .maxTempField: return "Temp. máxima:"
+        case .baseRPMField: return "RPM base:"
+        case .maxRPMField: return "RPM máximo:"
+        case .cancel: return "Cancelar"
+        case .saveProfile: return "Guardar perfil"
+        case .deleteProfile: return "Eliminar perfil"
+
         case .tabProfiles: return "Perfiles"
         case .tabSensors: return "Sensores de hardware"
-        case .tabHelper: return "Demonio auxiliar"
+        case .tabHelper: return "Herramienta de ayuda"
         case .tabGeneral: return "General"
         case .language: return "Idioma"
         case .iconTheme: return "Tema del icono"
@@ -288,10 +381,10 @@ public enum LocalizedKey {
         case .energyDesc: return "Pausa la telemetría y devuelve el control a macOS durante el reposo del sistema."
         case .failsafeThreshold: return "Límite de seguridad térmica:"
         case .failsafeDesc: return "Si el procesador supera 86°C, Breeze activa inmediatamente el 100% de ventilación."
-        case .helperActive: return "El demonio auxiliar está activo"
-        case .helperInactive: return "Demonio auxiliar no instalado / inactivo"
-        case .helperInstallBtn: return "Instalar demonio auxiliar..."
-        case .helperReinstallBtn: return "Reinstalar demonio auxiliar"
+        case .helperActive: return "La herramienta de ayuda está activa"
+        case .helperInactive: return "Herramienta de ayuda no instalada / inactiva"
+        case .helperInstallBtn: return "Instalar herramienta de ayuda..."
+        case .helperReinstallBtn: return "Reinstalar herramienta de ayuda"
         }
     }
 }

@@ -5,7 +5,7 @@ public final class ProfileEditorViewModel: ObservableObject {
     @Published public var isCreatingCustom: Bool = false
 
     // New profile form state
-    @Published public var newName: String = "My Cooling Curve"
+    @Published public var newName: String = "Moja krzywa"
     @Published public var newStartTemp: Float = 45.0
     @Published public var newMaxTemp: Float = 75.0
     @Published public var newBaseRPM: Float = 1800.0
@@ -17,8 +17,9 @@ public final class ProfileEditorViewModel: ObservableObject {
 public struct ProfileEditorView: View {
     @ObservedObject var manager = FanManager.shared
     @ObservedObject var viewModel: ProfileEditorViewModel
+    @ObservedObject var loc = LocalizationManager.shared
 
-    public init(viewModel: ProfileEditorViewModel = ProfileEditorViewModel()) {
+    public init(viewModel: ProfileEditorViewModel) {
         self.viewModel = viewModel
     }
 
@@ -26,14 +27,14 @@ public struct ProfileEditorView: View {
         HStack(spacing: 0) {
             // Profile List Sidebar
             VStack(alignment: .leading, spacing: 6) {
-                Text("PROFILES")
+                Text(loc.text(.profilesHeader))
                     .font(.system(size: 11, weight: .bold))
                     .foregroundColor(.secondary)
-                    .padding(.horizontal, 12)
-                    .padding(.top, 12)
+                    .padding(.horizontal, 14)
+                    .padding(.top, 14)
 
                 ScrollView {
-                    VStack(spacing: 2) {
+                    VStack(spacing: 3) {
                         ForEach(manager.profiles) { profile in
                             let isSelected = (viewModel.selectedProfileId == profile.id)
                             Button(action: {
@@ -44,7 +45,7 @@ public struct ProfileEditorView: View {
                                         Text(profile.localizedName)
                                             .font(.system(size: 13, weight: .medium))
                                             .foregroundColor(isSelected ? .white : .primary)
-                                        Text(profile.type.rawValue)
+                                        Text(profile.type == .custom ? loc.text(.profileCustom) : profile.type.localizedName)
                                             .font(.system(size: 10))
                                             .foregroundColor(isSelected ? .white.opacity(0.8) : .secondary)
                                     }
@@ -55,25 +56,33 @@ public struct ProfileEditorView: View {
                                     }
                                 }
                                 .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
+                                .padding(.vertical, 7)
                                 .background(isSelected ? Color.accentColor : Color.clear)
                                 .cornerRadius(6)
                             }
                             .buttonStyle(.plain)
                         }
                     }
-                    .padding(.horizontal, 6)
+                    .padding(.horizontal, 8)
                 }
 
                 Divider()
 
-                Button(action: { viewModel.isCreatingCustom.toggle() }) {
-                    Label("Add Custom Profile", systemImage: "plus.circle")
+                Button(action: {
+                    viewModel.newName = loc.text(.profileCustom)
+                    viewModel.isCreatingCustom = true
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "plus.circle.fill")
+                        Text(loc.text(.addCustomProfile))
+                    }
+                    .font(.system(size: 12, weight: .medium))
                 }
-                .buttonStyle(.borderless)
-                .padding(12)
+                .buttonStyle(.plain)
+                .foregroundColor(.accentColor)
+                .padding(14)
             }
-            .frame(width: 200)
+            .frame(width: 210)
 
             Divider()
 
@@ -85,10 +94,21 @@ public struct ProfileEditorView: View {
                             Text(profile.localizedName)
                                 .font(.system(size: 20, weight: .bold))
                             Spacer()
-                            Button("Activate Profile") {
-                                manager.selectProfile(profile)
+
+                            if manager.activeProfile.id == profile.id {
+                                Text(loc.text(.profileActive))
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(.accentColor)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 4)
+                                    .background(Color.accentColor.opacity(0.15))
+                                    .cornerRadius(6)
+                            } else {
+                                Button(loc.text(.activateProfile)) {
+                                    manager.selectProfile(profile)
+                                }
+                                .buttonStyle(.borderedProminent)
                             }
-                            .buttonStyle(.borderedProminent)
                         }
 
                         Text(profile.localizedSubtitle)
@@ -100,7 +120,7 @@ public struct ProfileEditorView: View {
 
                     if let curve = profile.curve {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("Cooling Curve Parameters")
+                            Text(loc.text(.curveParams))
                                 .font(.system(size: 14, weight: .semibold))
 
                             // Curve Visualization
@@ -112,47 +132,66 @@ public struct ProfileEditorView: View {
 
                             Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 10) {
                                 GridRow {
-                                    Text("Ramp Start Temp:")
+                                    Text(loc.text(.rampStartTemp))
                                         .foregroundColor(.secondary)
                                     Text("\(Int(curve.startTemp)) °C")
                                         .fontWeight(.medium)
                                 }
                                 GridRow {
-                                    Text("Max Fan Speed Temp:")
+                                    Text(loc.text(.maxFanTemp))
                                         .foregroundColor(.secondary)
                                     Text("\(Int(curve.maxTemp)) °C")
                                         .fontWeight(.medium)
                                 }
                                 GridRow {
-                                    Text("Base Idle Speed:")
+                                    Text(loc.text(.baseIdleSpeed))
                                         .foregroundColor(.secondary)
                                     Text("\(Int(curve.baseRPM)) RPM")
                                         .fontWeight(.medium)
                                 }
                                 GridRow {
-                                    Text("Target Peak Speed:")
+                                    Text(loc.text(.targetPeakSpeed))
                                         .foregroundColor(.secondary)
                                     Text("\(Int(curve.maxRPM)) RPM")
                                         .fontWeight(.medium)
                                 }
                             }
                             .font(.system(size: 12))
+
+                            if profile.type == .custom {
+                                Divider()
+                                HStack {
+                                    Spacer()
+                                    Button(role: .destructive, action: {
+                                        manager.profiles.removeAll(where: { $0.id == profile.id })
+                                        if let fallback = manager.profiles.first {
+                                            manager.selectProfile(fallback)
+                                            viewModel.selectedProfileId = fallback.id
+                                        }
+                                    }) {
+                                        Label(loc.text(.deleteProfile), systemImage: "trash")
+                                    }
+                                    .buttonStyle(.bordered)
+                                }
+                            }
                         }
                     } else if profile.type == .system {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Apple Silicon Hardware Management")
+                            Text(loc.text(.systemManagementTitle))
                                 .font(.system(size: 14, weight: .semibold))
-                            Text("In System mode, the Apple Silicon SMC and CLPC (Closed Loop Performance Controller) determine fan speeds dynamically based on hundreds of internal thermal diode matrices.")
+                            Text(loc.text(.systemManagementDesc))
                                 .font(.system(size: 12))
                                 .foregroundColor(.secondary)
+                                .lineSpacing(3)
                         }
                     } else if profile.type == .max {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Maximum Airflow Override")
+                            Text(loc.text(.maxAirflowTitle))
                                 .font(.system(size: 14, weight: .semibold))
-                            Text("Forces the fan to 100% duty cycle (4900 RPM) for rapid cooling after extreme workloads or benchmark runs.")
+                            Text(loc.text(.maxAirflowDesc))
                                 .font(.system(size: 12))
                                 .foregroundColor(.secondary)
+                                .lineSpacing(3)
                         }
                     }
 
@@ -163,7 +202,7 @@ public struct ProfileEditorView: View {
                     Spacer()
                 }
             }
-            .padding(20)
+            .padding(24)
             .sheet(isPresented: Binding(
                 get: { viewModel.isCreatingCustom },
                 set: { viewModel.isCreatingCustom = $0 }
@@ -176,11 +215,11 @@ public struct ProfileEditorView: View {
 
     private var createCustomProfileSheet: some View {
         VStack(spacing: 16) {
-            Text("Create Custom Profile")
+            Text(loc.text(.createCustomTitle))
                 .font(.headline)
 
             Form {
-                TextField("Profile Name:", text: Binding(
+                TextField(loc.text(.profileNameField), text: Binding(
                     get: { viewModel.newName },
                     set: { viewModel.newName = $0 }
                 ))
@@ -189,39 +228,41 @@ public struct ProfileEditorView: View {
                     get: { viewModel.newStartTemp },
                     set: { viewModel.newStartTemp = $0 }
                 ), in: 30...70, step: 1) {
-                    Text("Start Temp: \(Int(viewModel.newStartTemp)) °C")
+                    Text("\(loc.text(.startTempField)) \(Int(viewModel.newStartTemp)) °C")
                 }
 
                 Slider(value: Binding(
                     get: { viewModel.newMaxTemp },
                     set: { viewModel.newMaxTemp = $0 }
                 ), in: 60...95, step: 1) {
-                    Text("Max Temp: \(Int(viewModel.newMaxTemp)) °C")
+                    Text("\(loc.text(.maxTempField)) \(Int(viewModel.newMaxTemp)) °C")
                 }
 
                 Slider(value: Binding(
                     get: { viewModel.newBaseRPM },
                     set: { viewModel.newBaseRPM = $0 }
                 ), in: 1000...3000, step: 50) {
-                    Text("Base RPM: \(Int(viewModel.newBaseRPM))")
+                    Text("\(loc.text(.baseRPMField)) \(Int(viewModel.newBaseRPM))")
                 }
 
                 Slider(value: Binding(
                     get: { viewModel.newMaxRPM },
                     set: { viewModel.newMaxRPM = $0 }
                 ), in: 3000...4900, step: 50) {
-                    Text("Max RPM: \(Int(viewModel.newMaxRPM))")
+                    Text("\(loc.text(.maxRPMField)) \(Int(viewModel.newMaxRPM))")
                 }
             }
             .padding()
 
             HStack {
-                Button("Cancel") { viewModel.isCreatingCustom = false }
+                Button(loc.text(.cancel)) {
+                    viewModel.isCreatingCustom = false
+                }
                 Spacer()
-                Button("Save Profile") {
+                Button(loc.text(.saveProfile)) {
                     let custom = FanProfile(
                         id: "custom_\(UUID().uuidString.prefix(6))",
-                        name: viewModel.newName,
+                        name: viewModel.newName.isEmpty ? loc.text(.profileCustom) : viewModel.newName,
                         type: .custom,
                         subtitle: "Custom curve: \(Int(viewModel.newBaseRPM))-\(Int(viewModel.newMaxRPM)) RPM",
                         isManual: true,
@@ -242,7 +283,8 @@ public struct ProfileEditorView: View {
             .padding(.horizontal)
             .padding(.bottom)
         }
-        .frame(width: 380, height: 340)
+        .frame(width: 400, height: 350)
+        .padding(16)
     }
 }
 
