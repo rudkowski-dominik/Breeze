@@ -72,20 +72,15 @@ Gotowy instalator znajduje się w pliku:
 
 ---
 
-## 🐙 Jak wrzucić na GitHub / Push to GitHub
+## 🐙 Repozytorium GitHub / GitHub Repository
 
-Repozytorium Git zostało zainicjalizowane lokalnie. Aby opublikować je na swoim koncie GitHub:
+Projekt jest dostępny na GitHubie:
+👉 **[https://github.com/rudkowski-dominik/Breeze](https://github.com/rudkowski-dominik/Breeze)**
 
 ```bash
-cd /Users/dominik/.gemini/antigravity/scratch/Breeze
-
-# 1. Utwórz nowe repozytorium na github.com (np. o nazwie "Breeze")
-# 2. Podłącz zdalne repozytorium (zastąp YOUR_USERNAME swoją nazwą użytkownika):
-git remote add origin https://github.com/YOUR_USERNAME/Breeze.git
-
-# 3. Zmień nazwę gałęzi na main i wyślij kod:
-git branch -M main
-git push -u origin main
+git clone https://github.com/rudkowski-dominik/Breeze.git
+cd Breeze
+./scripts/build.sh
 ```
 
 ---
