@@ -1,7 +1,11 @@
 # Breeze 🌬️ — Apple Silicon Fan Control
 
 <p align="center">
-  <img src="AppIcon_preview.png" width="140" height="140" alt="Breeze App Icon" style="border-radius: 28px; box-shadow: 0 10px 25px rgba(0,0,0,0.3);"/>
+  <img src="assets/AppIcon-Light.png" width="130" height="130" alt="Breeze Light Mode Icon" style="border-radius: 26px; margin-right: 18px; box-shadow: 0 10px 25px rgba(0,0,0,0.15);"/>
+  <img src="assets/AppIcon-Dark.png" width="130" height="130" alt="Breeze Dark Mode Icon" style="border-radius: 26px; margin-left: 18px; box-shadow: 0 10px 25px rgba(0,0,0,0.35);"/>
+</p>
+<p align="center">
+  <i>Light Mode &nbsp; • &nbsp; Dark Mode</i>
 </p>
 
 <p align="center">

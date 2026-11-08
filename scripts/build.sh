@@ -7,11 +7,14 @@ APP_DIR="$ROOT_DIR/Breeze.app"
 
 echo "=== Building Breeze for Apple Silicon (Mac mini M5 Pro) ==="
 
-# 1. Generate Liquid Glass Icon if needed
-if [ ! -f "$ROOT_DIR/AppIcon.icns" ]; then
-    echo "Generating Liquid Glass AppIcon.icns..."
-    swift "$SCRIPT_DIR/generate_icon.swift"
+# 1. Process user icons if needed
+if [ ! -f "$ROOT_DIR/AppIcon.icns" ] || [ ! -f "$ROOT_DIR/assets/AppIcon-Light.png" ]; then
+    echo "Processing Liquid Glass user icons..."
+    swift "$SCRIPT_DIR/process_user_icons.swift"
     iconutil -c icns "$ROOT_DIR/AppIcon.iconset" -o "$ROOT_DIR/AppIcon.icns"
+    iconutil -c icns "$ROOT_DIR/AppIcon-Dark.iconset" -o "$ROOT_DIR/assets/AppIcon-Dark.icns"
+    iconutil -c icns "$ROOT_DIR/AppIcon-Light.iconset" -o "$ROOT_DIR/assets/AppIcon-Light.icns"
+    rm -rf "$ROOT_DIR"/*.iconset
 fi
 
 # 2. Compile Privileged Helper
@@ -47,6 +50,8 @@ cp "$ROOT_DIR/Breeze" "$APP_DIR/Contents/MacOS/Breeze"
 cp "$ROOT_DIR/breeze-helper" "$APP_DIR/Contents/Library/LaunchServices/breeze-helper"
 cp "$ROOT_DIR/breeze-helper" "$APP_DIR/Contents/MacOS/breeze-helper"
 cp "$ROOT_DIR/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
+cp "$ROOT_DIR/assets/AppIcon-Light.png" "$APP_DIR/Contents/Resources/AppIcon-Light.png"
+cp "$ROOT_DIR/assets/AppIcon-Dark.png" "$APP_DIR/Contents/Resources/AppIcon-Dark.png"
 
 # 5. Generate Info.plist
 cat << 'PLIST' > "$APP_DIR/Contents/Info.plist"
