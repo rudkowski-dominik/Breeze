@@ -52,31 +52,38 @@ public enum ProfileType: String, Codable, CaseIterable, Sendable {
     case silent = "Silent"
     case custom = "Custom"
 
-    public var bestForDescription: String {
+    public var localizedName: String {
+        let loc = LocalizationManager.shared
         switch self {
-        case .system:
-            return "Lets macOS manage the fans."
-        case .max:
-            return "Runs each fan at its maximum."
-        case .systemPlus:
-            return "Gentle, earlier airflow for everyday use."
-        case .coolChassis:
-            return "Keeps the typing area cool and comfortable."
-        case .gaming:
-            return "Very early and stronger cooling during sustained loads."
-        case .silent:
-            return "Keeps the fans slower for quiet environments."
-        case .custom:
-            return "Create your own cooling curves and temperature targets."
+        case .system: return loc.text(.profileSystem)
+        case .max: return loc.text(.profileMax)
+        case .systemPlus: return loc.text(.profileSystemPlus)
+        case .coolChassis: return loc.text(.profileCoolChassis)
+        case .gaming: return loc.text(.profileGaming)
+        case .silent: return loc.text(.profileSilent)
+        case .custom: return loc.text(.profileCustom)
+        }
+    }
+
+    public var bestForDescription: String {
+        let loc = LocalizationManager.shared
+        switch self {
+        case .system: return loc.text(.profileSystemDesc)
+        case .max: return loc.text(.profileMaxDesc)
+        case .systemPlus: return loc.text(.profileSystemPlusDesc)
+        case .coolChassis: return loc.text(.profileCoolChassisDesc)
+        case .gaming: return loc.text(.profileGamingDesc)
+        case .silent: return loc.text(.profileSilentDesc)
+        case .custom: return loc.text(.profileCustomDesc)
         }
     }
 }
 
 public struct CoolingCurve: Codable, Equatable, Sendable {
-    public var startTemp: Float      // Temperature where fan begins ramping above floor (°C)
-    public var maxTemp: Float        // Temperature where fan hits curve max RPM (°C)
-    public var baseRPM: Float        // Baseline idle RPM floor
-    public var maxRPM: Float         // Target peak RPM
+    public var startTemp: Float
+    public var maxTemp: Float
+    public var baseRPM: Float
+    public var maxRPM: Float
 
     public init(startTemp: Float, maxTemp: Float, baseRPM: Float, maxRPM: Float) {
         self.startTemp = startTemp
@@ -95,7 +102,6 @@ public struct CoolingCurve: Codable, Equatable, Sendable {
             return effMax
         } else {
             let progress = (currentTemp - startTemp) / max(1.0, (maxTemp - startTemp))
-            // Smooth S-curve (cubic hermite interpolation) to avoid sharp acoustic inflection points
             let smoothed = progress * progress * (3.0 - 2.0 * progress)
             return effBase + smoothed * (effMax - effBase)
         }
@@ -110,6 +116,14 @@ public struct FanProfile: Identifiable, Codable, Equatable, Sendable {
     public var isManual: Bool
     public var fixedRPM: Float?
     public var curve: CoolingCurve?
+
+    public var localizedName: String {
+        return type == .custom ? name : type.localizedName
+    }
+
+    public var localizedSubtitle: String {
+        return type == .custom ? subtitle : type.bestForDescription
+    }
 
     public init(
         id: String = UUID().uuidString,
@@ -155,7 +169,7 @@ public struct FanProfile: Identifiable, Codable, Equatable, Sendable {
                 curve: CoolingCurve(
                     startTemp: 58.0,
                     maxTemp: 84.0,
-                    baseRPM: 1700.0, // Quiet gentle airflow, inaudible on Mac mini
+                    baseRPM: 1700.0,
                     maxRPM: 3400.0
                 )
             ),
@@ -199,6 +213,20 @@ public struct FanProfile: Identifiable, Codable, Equatable, Sendable {
                 )
             )
         ]
+    }
+}
+
+extension TimerDuration {
+    public var localizedTitle: String {
+        let loc = LocalizationManager.shared
+        switch self {
+        case .indefinitely: return loc.text(.indefinitely)
+        case .for15Mins: return loc.text(.for15Mins)
+        case .for30Mins: return loc.text(.for30Mins)
+        case .for1Hour: return loc.text(.for1Hour)
+        case .for2Hours: return loc.text(.for2Hours)
+        case .untilQuit: return loc.text(.untilQuit)
+        }
     }
 }
 ```
@@ -509,6 +537,7 @@ public final class SMCEngine: @unchecked Sendable {
 ```swift
 import Foundation
 import Combine
+import AppKit
 
 public enum TimerDuration: String, CaseIterable, Identifiable, Sendable {
     case indefinitely = "Indefinitely"
@@ -543,18 +572,18 @@ public final class FanManager: ObservableObject, @unchecked Sendable {
     @Published public var activeDuration: TimerDuration = .indefinitely
     @Published public var timerRemainingText: String? = nil
     @Published public var isHelperActive: Bool = false
+    @Published public var isSystemSleeping: Bool = false
 
     private var monitorTimer: Timer?
     private var durationTimer: Timer?
     private var expiryDate: Date?
 
-    // Acoustic Stabilization & Slew Rate Controller:
-    // Prevents fan surging, hunting, and revving
+    // Slew rate controller & acoustic stabilization
     private var currentOutputRPM: Float?
     private var cooldownUntil: Date = Date.distantPast
-    private let maxRampDownPerTick: Float = 75.0 // RPM per 1.5s (~50 RPM/s)
-    private let maxRampUpPerTick: Float = 150.0  // Smooth ramp up
-    private let hysteresisHoldDuration: TimeInterval = 7.0 // Hold high speed 7s before ramping down
+    private let maxRampDownPerTick: Float = 75.0
+    private let maxRampUpPerTick: Float = 150.0
+    private let hysteresisHoldDuration: TimeInterval = 7.0
 
     private init() {
         let detectedFans = SMCEngine.shared.getFans()
@@ -567,18 +596,63 @@ public final class FanManager: ObservableObject, @unchecked Sendable {
         self.fans = detectedFans
 
         updateTelemetry()
-        startMonitoringLoop()
+        setupPowerAndSleepObservers()
+        startAdaptiveMonitoringLoop()
     }
 
-    public func startMonitoringLoop() {
+    // MARK: - Energy Optimization & Sleep Observers
+    private func setupPowerAndSleepObservers() {
+        let nc = NSWorkspace.shared.notificationCenter
+
+        // 1. System Will Sleep -> Safe firmware handoff & pause timers
+        nc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self = self else { return }
+            self.isSystemSleeping = true
+            self.monitorTimer?.invalidate()
+            self.monitorTimer = nil
+
+            // Release all fans back to native macOS firmware before sleep
+            for fan in self.fans {
+                _ = HelperClient.shared.resetToSystem(fanIndex: fan.id)
+            }
+        }
+
+        // 2. System Did Wake -> Restore telemetry & reapply profile
+        nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self = self else { return }
+            self.isSystemSleeping = false
+            self.startAdaptiveMonitoringLoop()
+            self.evaluateActiveProfile(force: true)
+        }
+
+        // 3. Screen Sleep -> Throttle polling to save energy
+        nc.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self = self, !self.isSystemSleeping else { return }
+            self.restartMonitoringTimer(interval: 10.0) // 10s idle interval
+        }
+
+        // 4. Screen Wake -> Resume normal adaptive polling
+        nc.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self = self, !self.isSystemSleeping else { return }
+            self.startAdaptiveMonitoringLoop()
+        }
+    }
+
+    public func startAdaptiveMonitoringLoop() {
+        // Adaptive polling interval: 4s when system manages, 1.5s when active curve regulates
+        let interval: TimeInterval = (activeProfile.type == .system) ? 4.0 : 1.5
+        restartMonitoringTimer(interval: interval)
+    }
+
+    private func restartMonitoringTimer(interval: TimeInterval) {
         monitorTimer?.invalidate()
-        // Run loop every 1.5s
-        monitorTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+        monitorTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.tick()
         }
     }
 
     private func tick() {
+        guard !isSystemSleeping else { return }
         updateTelemetry()
         checkHelperStatus()
         evaluateActiveProfile()
@@ -588,9 +662,7 @@ public final class FanManager: ObservableObject, @unchecked Sendable {
     public func checkHelperStatus() {
         let running = HelperClient.shared.pingDaemon()
         if running != isHelperActive {
-            DispatchQueue.main.async {
-                self.isHelperActive = running
-            }
+            DispatchQueue.main.async { self.isHelperActive = running }
         }
     }
 
@@ -598,6 +670,7 @@ public final class FanManager: ObservableObject, @unchecked Sendable {
         let updatedFans = SMCEngine.shared.getFans()
         let temp = SMCEngine.shared.getPrimaryTemperature()
         let sensors = SMCEngine.shared.getTemperatureSensors()
+        let loc = LocalizationManager.shared
 
         DispatchQueue.main.async {
             self.fans = updatedFans
@@ -606,16 +679,15 @@ public final class FanManager: ObservableObject, @unchecked Sendable {
 
             if let fan = updatedFans.first {
                 if self.activeProfile.type == .system {
-                    if fan.isManual {
-                        self.statusMessage = "Monitoring · external manual control observed"
-                    } else {
-                        self.statusMessage = "System Managed · macOS Thermal Governance"
-                    }
+                    self.statusMessage = fan.isManual ?
+                        loc.text(.monitoringExternal) :
+                        loc.text(.systemManaged)
                 } else {
-                    if let remaining = self.timerRemainingText {
-                        self.statusMessage = "\(self.activeProfile.name) (\(remaining)) · SoC \(String(format: "%.1f", temp))°C"
+                    let tempStr = String(format: "%.1f", temp)
+                    if let rem = self.timerRemainingText {
+                        self.statusMessage = "\(self.activeProfile.name) (\(rem)) · SoC \(tempStr)°C"
                     } else {
-                        self.statusMessage = "\(self.activeProfile.name) Active · SoC \(String(format: "%.1f", temp))°C"
+                        self.statusMessage = loc.text(.activeProfileText(self.activeProfile.name, tempStr))
                     }
                 }
             }
@@ -625,6 +697,7 @@ public final class FanManager: ObservableObject, @unchecked Sendable {
     public func selectProfile(_ profile: FanProfile) {
         activeProfile = profile
         currentOutputRPM = nil
+        startAdaptiveMonitoringLoop() // Adjust interval dynamically
         evaluateActiveProfile(force: true)
     }
 
@@ -632,9 +705,8 @@ public final class FanManager: ObservableObject, @unchecked Sendable {
         activeDuration = duration
         durationTimer?.invalidate()
         durationTimer = nil
-
-        if let seconds = duration.seconds {
-            expiryDate = Date().addingTimeInterval(seconds)
+        if let sec = duration.seconds {
+            expiryDate = Date().addingTimeInterval(sec)
             durationTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
                 self?.checkTimerExpiry()
             }
@@ -648,7 +720,7 @@ public final class FanManager: ObservableObject, @unchecked Sendable {
         guard let fan = fans.first else { return }
         let clampedPct = max(0, min(100, percentage))
         let rpm = fan.minRPM + ((fan.maxRPM - fan.minRPM) * (clampedPct / 100.0))
-        let customProfile = FanProfile(
+        let custom = FanProfile(
             id: "custom_speed_\(Int(clampedPct))",
             name: "Custom (\(Int(clampedPct))%)",
             type: .custom,
@@ -656,14 +728,14 @@ public final class FanManager: ObservableObject, @unchecked Sendable {
             isManual: true,
             fixedRPM: rpm
         )
-        selectProfile(customProfile)
+        selectProfile(custom)
     }
 
     public func setCustomRPM(_ rpm: Float) {
         guard let fan = fans.first else { return }
         let clamped = max(fan.minRPM, min(rpm, fan.maxRPM))
         let pct = Int(((clamped - fan.minRPM) / (fan.maxRPM - fan.minRPM)) * 100.0)
-        let customProfile = FanProfile(
+        let custom = FanProfile(
             id: "custom_rpm_\(Int(clamped))",
             name: "Custom (\(pct)%)",
             type: .custom,
@@ -671,125 +743,99 @@ public final class FanManager: ObservableObject, @unchecked Sendable {
             isManual: true,
             fixedRPM: clamped
         )
-        selectProfile(customProfile)
+        selectProfile(custom)
     }
 
+    // MARK: - Multi-Fan Control Loop
     private func evaluateActiveProfile(force: Bool = false) {
-        guard let fan = fans.first else { return }
+        guard !fans.isEmpty else { return }
 
-        // Thermal Runaway Safety Watchdog:
-        // If peak diode temperature hits 86°C, immediately force 100% cooling to protect hardware
-        let peakTemp = SMCEngine.shared.getInstantPeakTemperature()
-        if peakTemp >= 86.0 && activeProfile.type != .system {
-            applyTargetRPM(fan.maxRPM, fanIndex: fan.id)
+        // Thermal Runaway Watchdog: If any diode hits 86°C, ramp 100% on ALL fans
+        if SMCEngine.shared.getInstantPeakTemperature() >= 86.0 && activeProfile.type != .system {
+            applyTargetRPMToAll(maxAllFans: true)
             return
         }
 
         switch activeProfile.type {
         case .system:
-            if fan.isManual || force {
-                _ = HelperClient.shared.resetToSystem(fanIndex: fan.id)
+            if fans.contains(where: { $0.isManual }) || force {
+                for fan in fans {
+                    _ = HelperClient.shared.resetToSystem(fanIndex: fan.id)
+                }
                 currentOutputRPM = nil
             }
 
         case .max:
-            applyTargetRPM(fan.maxRPM, fanIndex: fan.id)
+            applyTargetRPMToAll(maxAllFans: true)
 
         case .systemPlus, .coolChassis, .gaming, .silent, .custom:
             var desiredRPM: Float
             if let fixed = activeProfile.fixedRPM {
                 desiredRPM = fixed
             } else if let curve = activeProfile.curve {
+                let firstFan = fans[0]
                 desiredRPM = curve.calculateTargetRPM(
                     currentTemp: currentTemperature,
-                    hardwareMin: fan.minRPM,
-                    hardwareMax: fan.maxRPM
+                    hardwareMin: firstFan.minRPM,
+                    hardwareMax: firstFan.maxRPM
                 )
-            } else {
-                return
-            }
+            } else { return }
 
-            // Apply acoustic stabilization with slew-rate limiting and cooldown hold
-            let target = computeStabilizedRPM(desiredRPM: desiredRPM, currentActual: fan.actualRPM, force: force)
-            applyTargetRPM(target, fanIndex: fan.id)
+            let target = computeStabilizedRPM(desiredRPM: desiredRPM, currentActual: fans[0].actualRPM, force: force)
+            applyTargetRPMToAll(targetRPM: target)
         }
     }
 
-    /// Acoustic Stabilization Algorithm:
-    /// Clamps rate of change so fans never jerk or jump abruptly
     private func computeStabilizedRPM(desiredRPM: Float, currentActual: Float, force: Bool) -> Float {
         guard let current = currentOutputRPM, !force else {
             currentOutputRPM = desiredRPM
             return desiredRPM
         }
-
         let diff = desiredRPM - current
-
-        // Deadband: Ignore small jitter < 50 RPM
-        if abs(diff) < 50.0 {
-            return current
-        }
-
+        if abs(diff) < 50.0 { return current }
         let now = Date()
-
         if diff > 0 {
-            // Temperature is rising: ramp up smoothly
             cooldownUntil = now.addingTimeInterval(hysteresisHoldDuration)
-            let step = min(diff, maxRampUpPerTick)
-            let nextRPM = current + step
-            currentOutputRPM = nextRPM
-            return nextRPM
+            let next = current + min(diff, maxRampUpPerTick)
+            currentOutputRPM = next
+            return next
         } else {
-            // Temperature is falling: apply hysteresis cooldown delay
-            if now < cooldownUntil {
-                // Hold higher speed until cooldown expires
-                return current
-            }
-            // Ramp down gently like a whisper
-            let step = min(abs(diff), maxRampDownPerTick)
-            let nextRPM = current - step
-            currentOutputRPM = nextRPM
-            return nextRPM
+            if now < cooldownUntil { return current }
+            let next = current - min(abs(diff), maxRampDownPerTick)
+            currentOutputRPM = next
+            return next
         }
     }
 
-    private func applyTargetRPM(_ rpm: Float, fanIndex: Int) {
-        // Strict hardware bounds clamping
-        guard let fan = fans.first(where: { $0.id == fanIndex }) ?? fans.first else { return }
-        let clamped = max(fan.minRPM, min(rpm, fan.maxRPM))
-        _ = HelperClient.shared.setFanSpeed(fanIndex: fanIndex, targetRPM: clamped)
+    // Universal Multi-Fan Dispatch
+    private func applyTargetRPMToAll(targetRPM: Float = 0, maxAllFans: Bool = false) {
+        for fan in fans {
+            let rpm = maxAllFans ? fan.maxRPM : max(fan.minRPM, min(targetRPM, fan.maxRPM))
+            _ = HelperClient.shared.setFanSpeed(fanIndex: fan.id, targetRPM: rpm)
+        }
     }
 
     private func checkTimerExpiry() {
         guard let expiry = expiryDate else { return }
-        let remaining = expiry.timeIntervalSinceNow
-        if remaining <= 0 {
+        let rem = expiry.timeIntervalSinceNow
+        if rem <= 0 {
             selectDuration(.indefinitely)
-            if let sys = profiles.first(where: { $0.type == .system }) {
-                selectProfile(sys)
-            }
+            if let sys = profiles.first(where: { $0.type == .system }) { selectProfile(sys) }
         } else {
-            let mins = Int(remaining) / 60
-            let secs = Int(remaining) % 60
-            timerRemainingText = String(format: "%02d:%02d", mins, secs)
+            timerRemainingText = String(format: "%02d:%02d", Int(rem)/60, Int(rem)%60)
         }
     }
 
     private func updateTimerStatus() {
         if let expiry = expiryDate {
-            let remaining = expiry.timeIntervalSinceNow
-            if remaining > 0 {
-                let mins = Int(remaining) / 60
-                let secs = Int(remaining) % 60
-                timerRemainingText = String(format: "%02d:%02d", mins, secs)
-            }
+            let rem = expiry.timeIntervalSinceNow
+            if rem > 0 { timerRemainingText = String(format: "%02d:%02d", Int(rem)/60, Int(rem)%60) }
         }
     }
 
     public func shutdown() {
         monitorTimer?.invalidate()
         durationTimer?.invalidate()
-        // Safe exit: Hand control back to macOS firmware
         for fan in fans {
             _ = HelperClient.shared.resetToSystem(fanIndex: fan.id)
         }
@@ -953,6 +999,308 @@ public final class HelperClient: @unchecked Sendable {
 ```
 
 ---
+## Plik: `Sources/Breeze/Services/LocalizationManager.swift`
+```swift
+import Foundation
+
+public enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
+    case english = "en"
+    case polish = "pl"
+    case spanish = "es"
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .english: return "English 🇬🇧"
+        case .polish: return "Polski 🇵🇱"
+        case .spanish: return "Español 🇪🇸"
+        }
+    }
+}
+
+public final class LocalizationManager: ObservableObject, @unchecked Sendable {
+    public static let shared = LocalizationManager()
+
+    @Published public var currentLanguage: AppLanguage {
+        didSet {
+            UserDefaults.standard.set(currentLanguage.rawValue, forKey: "breeze_app_language")
+        }
+    }
+
+    private init() {
+        if let saved = UserDefaults.standard.string(forKey: "breeze_app_language"),
+           let lang = AppLanguage(rawValue: saved) {
+            self.currentLanguage = lang
+        } else {
+            // Auto detect from system locale
+            let locale = Locale.current.language.languageCode?.identifier ?? "en"
+            if locale == "pl" {
+                self.currentLanguage = .polish
+            } else if locale == "es" {
+                self.currentLanguage = .spanish
+            } else {
+                self.currentLanguage = .english
+            }
+        }
+    }
+
+    public func text(_ key: LocalizedKey) -> String {
+        return key.translation(for: currentLanguage)
+    }
+}
+
+public enum LocalizedKey {
+    // Menu items
+    case customFanSpeed
+    case activateForUntil
+    case indefinitely
+    case for15Mins
+    case for30Mins
+    case for1Hour
+    case for2Hours
+    case untilQuit
+    case editProfiles
+    case settings
+    case quit
+
+    // Status messages
+    case monitoringExternal
+    case systemManaged
+    case activeProfileText(String, String)
+    case enterCustomRPM
+    case enterRPMDetails
+
+    // Profiles & Best for
+    case profileSystem
+    case profileSystemDesc
+    case profileMax
+    case profileMaxDesc
+    case profileSystemPlus
+    case profileSystemPlusDesc
+    case profileCoolChassis
+    case profileCoolChassisDesc
+    case profileGaming
+    case profileGamingDesc
+    case profileSilent
+    case profileSilentDesc
+    case profileCustom
+    case profileCustomDesc
+
+    // Settings tabs & options
+    case tabProfiles
+    case tabSensors
+    case tabHelper
+    case tabGeneral
+    case language
+    case iconTheme
+    case iconThemeAuto
+    case iconThemeDark
+    case iconThemeLight
+    case menuBarStyle
+    case menuBarIconOnly
+    case menuBarIconTemp
+    case menuBarIconRPM
+    case energyOptimization
+    case energyDesc
+    case failsafeThreshold
+    case failsafeDesc
+    case helperActive
+    case helperInactive
+    case helperInstallBtn
+    case helperReinstallBtn
+
+    public func translation(for lang: AppLanguage) -> String {
+        switch lang {
+        case .english:
+            return englishText
+        case .polish:
+            return polishText
+        case .spanish:
+            return spanishText
+        }
+    }
+
+    private var englishText: String {
+        switch self {
+        case .customFanSpeed: return "Custom Fan Speed"
+        case .activateForUntil: return "Activate for/until"
+        case .indefinitely: return "Indefinitely"
+        case .for15Mins: return "For 15 minutes"
+        case .for30Mins: return "For 30 minutes"
+        case .for1Hour: return "For 1 hour"
+        case .for2Hours: return "For 2 hours"
+        case .untilQuit: return "Until app quits"
+        case .editProfiles: return "Edit Profiles..."
+        case .settings: return "Settings..."
+        case .quit: return "Quit"
+
+        case .monitoringExternal: return "Monitoring · external manual control observed"
+        case .systemManaged: return "System Managed · macOS Thermal Governance"
+        case .activeProfileText(let name, let temp): return "\(name) Active · SoC \(temp)°C"
+        case .enterCustomRPM: return "Enter Custom RPM..."
+        case .enterRPMDetails: return "Enter target RPM (Hardware range: 1000 - 4900 RPM):"
+
+        case .profileSystem: return "System"
+        case .profileSystemDesc: return "Lets macOS manage the fans."
+        case .profileMax: return "Max"
+        case .profileMaxDesc: return "Runs each fan at its maximum."
+        case .profileSystemPlus: return "System+"
+        case .profileSystemPlusDesc: return "Gentle, earlier airflow for everyday use."
+        case .profileCoolChassis: return "Cool Chassis"
+        case .profileCoolChassisDesc: return "Keeps the typing area cool and comfortable."
+        case .profileGaming: return "Gaming"
+        case .profileGamingDesc: return "Very early and stronger cooling during sustained loads."
+        case .profileSilent: return "Silent"
+        case .profileSilentDesc: return "Keeps the fans slower for quiet environments."
+        case .profileCustom: return "Custom"
+        case .profileCustomDesc: return "Create your own cooling curves and temperature targets."
+
+        case .tabProfiles: return "Profiles"
+        case .tabSensors: return "Hardware Sensors"
+        case .tabHelper: return "Privileged Helper"
+        case .tabGeneral: return "General"
+        case .language: return "Language"
+        case .iconTheme: return "App Icon Theme"
+        case .iconThemeAuto: return "Automatic (System Appearance)"
+        case .iconThemeDark: return "Dark Glass (Always Dark)"
+        case .iconThemeLight: return "Frosted White (Always Light)"
+        case .menuBarStyle: return "Menu Bar Display"
+        case .menuBarIconOnly: return "Icon Only"
+        case .menuBarIconTemp: return "Icon + Temperature"
+        case .menuBarIconRPM: return "Icon + Fan RPM"
+        case .energyOptimization: return "Energy Optimization & Sleep Safety"
+        case .energyDesc: return "Automatically pauses telemetry and returns fans to macOS firmware during system sleep."
+        case .failsafeThreshold: return "Emergency Failsafe Threshold:"
+        case .failsafeDesc: return "If SoC temperature exceeds 86°C, Breeze immediately forces 100% cooling to protect hardware."
+        case .helperActive: return "Privileged Helper Daemon is Active"
+        case .helperInactive: return "Helper Daemon Not Installed / Inactive"
+        case .helperInstallBtn: return "Install Privileged Helper..."
+        case .helperReinstallBtn: return "Reinstall Helper Daemon"
+        }
+    }
+
+    private var polishText: String {
+        switch self {
+        case .customFanSpeed: return "Własna prędkość wentylatora"
+        case .activateForUntil: return "Włącz na czas"
+        case .indefinitely: return "Na stałe"
+        case .for15Mins: return "Na 15 minut"
+        case .for30Mins: return "Na 30 minut"
+        case .for1Hour: return "Na 1 godzinę"
+        case .for2Hours: return "Na 2 godziny"
+        case .untilQuit: return "Do zamknięcia programu"
+        case .editProfiles: return "Edytuj profile..."
+        case .settings: return "Ustawienia..."
+        case .quit: return "Zakończ"
+
+        case .monitoringExternal: return "Monitorowanie · wykryto zewnętrzne sterowanie"
+        case .systemManaged: return "Zarządzane przez system macOS"
+        case .activeProfileText(let name, let temp): return "\(name) aktywny · SoC \(temp)°C"
+        case .enterCustomRPM: return "Wpisz własną prędkość RPM..."
+        case .enterRPMDetails: return "Podaj docelowe obroty RPM (zakres sprzętowy: 1000 - 4900 RPM):"
+
+        case .profileSystem: return "System"
+        case .profileSystemDesc: return "macOS automatycznie zarządza chłodzeniem."
+        case .profileMax: return "Maksimum"
+        case .profileMaxDesc: return "Wymusza maksymalne obroty każdego wentylatora."
+        case .profileSystemPlus: return "System+"
+        case .profileSystemPlusDesc: return "Spokojny, wczesny przepływ powietrza do codziennej pracy."
+        case .profileCoolChassis: return "Chłodna obudowa"
+        case .profileCoolChassisDesc: return "Utrzymuje chłodną i komfortową obudowę komputera."
+        case .profileGaming: return "Gaming"
+        case .profileGamingDesc: return "Mocne i wczesne chłodzenie pod długim obciążeniem."
+        case .profileSilent: return "Cichy"
+        case .profileSilentDesc: return "Maksymalna cisza w spokojnym otoczeniu."
+        case .profileCustom: return "Własny"
+        case .profileCustomDesc: return "Twórz własne krzywe chłodzenia i docelowe temperatury."
+
+        case .tabProfiles: return "Profile"
+        case .tabSensors: return "Sensory sprzętowe"
+        case .tabHelper: return "Daemon pomocniczy"
+        case .tabGeneral: return "Ogólne"
+        case .language: return "Język aplikacji"
+        case .iconTheme: return "Motyw ikony programu"
+        case .iconThemeAuto: return "Automatyczny (motyw systemu)"
+        case .iconThemeDark: return "Ciemne szkło (zawsze ciemna)"
+        case .iconThemeLight: return "Mrożona biel (zawsze jasna)"
+        case .menuBarStyle: return "Wygląd w pasku zadań"
+        case .menuBarIconOnly: return "Tylko ikona"
+        case .menuBarIconTemp: return "Ikona + Temperatura"
+        case .menuBarIconRPM: return "Ikona + Obroty RPM"
+        case .energyOptimization: return "Optymalizacja energii i obsługa uśpienia"
+        case .energyDesc: return "Automatycznie wstrzymuje odpytywanie i oddaje kontrolę macOS podczas uśpienia komputera."
+        case .failsafeThreshold: return "Próg bezpieczeństwa awaryjnego:"
+        case .failsafeDesc: return "W przypadku wzrostu temperatury SoC powyżej 86°C, Breeze natychmiast wymusza 100% chłodzenia."
+        case .helperActive: return "Daemon pomocniczy jest aktywny"
+        case .helperInactive: return "Daemon nie jest zainstalowany lub jest nieaktywny"
+        case .helperInstallBtn: return "Zainstaluj daemona pomocniczego..."
+        case .helperReinstallBtn: return "Zainstaluj ponownie daemona"
+        }
+    }
+
+    private var spanishText: String {
+        switch self {
+        case .customFanSpeed: return "Velocidad personalizada"
+        case .activateForUntil: return "Activar durante"
+        case .indefinitely: return "Indefinidamente"
+        case .for15Mins: return "Durante 15 minutos"
+        case .for30Mins: return "Durante 30 minutos"
+        case .for1Hour: return "Durante 1 hora"
+        case .for2Hours: return "Durante 2 horas"
+        case .untilQuit: return "Hasta cerrar la app"
+        case .editProfiles: return "Editar perfiles..."
+        case .settings: return "Ajustes..."
+        case .quit: return "Salir"
+
+        case .monitoringExternal: return "Monitorizando · control manual externo detectado"
+        case .systemManaged: return "Controlado por macOS automáticamente"
+        case .activeProfileText(let name, let temp): return "\(name) activo · SoC \(temp)°C"
+        case .enterCustomRPM: return "Introducir RPM manual..."
+        case .enterRPMDetails: return "Introduce RPM objetivo (rango de hardware: 1000 - 4900 RPM):"
+
+        case .profileSystem: return "Sistema"
+        case .profileSystemDesc: return "macOS gestiona los ventiladores automáticamente."
+        case .profileMax: return "Máximo"
+        case .profileMaxDesc: return "Ejecuta cada ventilador a su máxima velocidad."
+        case .profileSystemPlus: return "Sistema+"
+        case .profileSystemPlusDesc: return "Flujo de aire suave y anticipado para el uso diario."
+        case .profileCoolChassis: return "Chasis frío"
+        case .profileCoolChassisDesc: return "Mantiene la carcasa fría y cómoda al tacto."
+        case .profileGaming: return "Juegos"
+        case .profileGamingDesc: return "Refrigeración temprana y potente bajo cargas intensas."
+        case .profileSilent: return "Silencioso"
+        case .profileSilentDesc: return "Mantiene los ventiladores lentos para máxima discreción."
+        case .profileCustom: return "Personalizado"
+        case .profileCustomDesc: return "Crea curvas de refrigeración y temperaturas objetivo."
+
+        case .tabProfiles: return "Perfiles"
+        case .tabSensors: return "Sensores de hardware"
+        case .tabHelper: return "Demonio auxiliar"
+        case .tabGeneral: return "General"
+        case .language: return "Idioma"
+        case .iconTheme: return "Tema del icono"
+        case .iconThemeAuto: return "Automático (según el sistema)"
+        case .iconThemeDark: return "Cristal oscuro (siempre oscuro)"
+        case .iconThemeLight: return "Blanco esmerilado (siempre claro)"
+        case .menuBarStyle: return "Visualización en la barra"
+        case .menuBarIconOnly: return "Solo icono"
+        case .menuBarIconTemp: return "Icono + Temperatura"
+        case .menuBarIconRPM: return "Icono + RPM"
+        case .energyOptimization: return "Optimización de energía y reposo"
+        case .energyDesc: return "Pausa la telemetría y devuelve el control a macOS durante el reposo del sistema."
+        case .failsafeThreshold: return "Límite de seguridad térmica:"
+        case .failsafeDesc: return "Si el procesador supera 86°C, Breeze activa inmediatamente el 100% de ventilación."
+        case .helperActive: return "El demonio auxiliar está activo"
+        case .helperInactive: return "Demonio auxiliar no instalado / inactivo"
+        case .helperInstallBtn: return "Instalar demonio auxiliar..."
+        case .helperReinstallBtn: return "Reinstalar demonio auxiliar"
+        }
+    }
+}
+```
+
+---
 ## Plik: `Sources/Breeze/UI/GaugeMenuItemView.swift`
 ```swift
 import AppKit
@@ -960,6 +1308,7 @@ import SwiftUI
 
 public struct FanGaugeSwiftUIView: View {
     @ObservedObject var manager = FanManager.shared
+    @ObservedObject var loc = LocalizationManager.shared
 
     public init() {}
 
@@ -968,7 +1317,7 @@ public struct FanGaugeSwiftUIView: View {
         let pct = fan?.percentage ?? 0
         let rpm = fan?.actualRPM ?? 0
 
-        VStack(spacing: 7) {
+        VStack(spacing: 9) {
             // Sleek horizontal progress bar
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
@@ -979,8 +1328,8 @@ public struct FanGaugeSwiftUIView: View {
                         .fill(
                             LinearGradient(
                                 colors: [
-                                    Color.white.opacity(0.85),
-                                    Color.white.opacity(0.95)
+                                    Color.cyan.opacity(0.85),
+                                    Color.blue.opacity(0.95)
                                 ],
                                 startPoint: .leading,
                                 endPoint: .trailing
@@ -990,12 +1339,40 @@ public struct FanGaugeSwiftUIView: View {
                 }
             }
             .frame(height: 5)
-            .padding(.horizontal, 24)
+            .padding(.horizontal, 22)
 
             // Fan Speed & RPM readout
-            Text("\(Int(round(pct)))% · \(Int(round(rpm))) RPM")
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .foregroundColor(.primary)
+            HStack(spacing: 6) {
+                Text("\(Int(round(pct)))% · \(Int(round(rpm))) RPM")
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundColor(.primary)
+
+                if manager.fans.count > 1 {
+                    Text("(\(manager.fans.count) Fans)")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            // Interactive Apple Control Center Style Slider
+            HStack(spacing: 10) {
+                Image(systemName: "fan")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+
+                Slider(value: Binding(
+                    get: { Double(pct) },
+                    set: { newVal in
+                        manager.setCustomFixedSpeed(percentage: Float(newVal))
+                    }
+                ), in: 0...100)
+                .controlSize(.small)
+
+                Image(systemName: "fan.fill")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 18)
 
             // Status message
             Text(manager.statusMessage)
@@ -1003,10 +1380,10 @@ public struct FanGaugeSwiftUIView: View {
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .lineLimit(2)
-                .padding(.horizontal, 16)
+                .padding(.horizontal, 14)
         }
         .padding(.vertical, 8)
-        .frame(width: 250)
+        .frame(width: 260)
     }
 }
 
@@ -1017,7 +1394,7 @@ public final class GaugeMenuItem: NSMenuItem {
         let swiftUIView = FanGaugeSwiftUIView()
         self.hostingView = NSHostingView(rootView: swiftUIView)
         super.init(title: "", action: nil, keyEquivalent: "")
-        self.hostingView.frame = NSRect(x: 0, y: 0, width: 250, height: 74)
+        self.hostingView.frame = NSRect(x: 0, y: 0, width: 260, height: 102)
         self.view = hostingView
     }
 
@@ -1033,6 +1410,14 @@ public final class GaugeMenuItem: NSMenuItem {
 import AppKit
 import SwiftUI
 
+public enum MenuBarDisplayStyle: String, CaseIterable, Identifiable, Sendable {
+    case iconOnly = "iconOnly"
+    case iconAndTemp = "iconAndTemp"
+    case iconAndRPM = "iconAndRPM"
+
+    public var id: String { rawValue }
+}
+
 public final class MenuBarController: NSObject, NSMenuDelegate {
     public static let shared = MenuBarController()
 
@@ -1041,31 +1426,61 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     private var gaugeMenuItem: GaugeMenuItem!
     private var refreshTimer: Timer?
 
+    public var displayStyle: MenuBarDisplayStyle = .iconOnly {
+        didSet {
+            UserDefaults.standard.set(displayStyle.rawValue, forKey: "breeze_menu_bar_style")
+            updateStatusItemButton()
+        }
+    }
+
     private override init() {
         super.init()
+        if let saved = UserDefaults.standard.string(forKey: "breeze_menu_bar_style"),
+           let style = MenuBarDisplayStyle(rawValue: saved) {
+            self.displayStyle = style
+        }
     }
 
     public func setup() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-
-        if let button = statusItem.button {
-            button.image = createAppleStyleFanIcon()
-            button.imagePosition = .imageOnly
-        }
+        updateStatusItemButton()
 
         buildMenu()
         statusItem.menu = menu
 
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.updateMenuState()
+            self?.updateStatusItemButton()
         }
     }
 
-    /// Creates an ultra-clean, Apple-minimalist vector fan icon for the macOS Menu Bar.
-    /// Perfectly aligned to the 18x18pt optical grid with native line weight and template vibrancy.
+    public func updateStatusItemButton() {
+        guard let button = statusItem?.button else { return }
+
+        button.image = createAppleStyleFanIcon()
+        button.imagePosition = .imageLeading
+
+        switch displayStyle {
+        case .iconOnly:
+            button.title = ""
+        case .iconAndTemp:
+            let temp = Int(round(FanManager.shared.currentTemperature))
+            button.title = " \(temp)°C"
+            button.font = NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .medium)
+        case .iconAndRPM:
+            let rpm = Int(round(FanManager.shared.fans.first?.actualRPM ?? 0))
+            if rpm >= 1000 {
+                let kRPM = String(format: "%.1fk", Float(rpm) / 1000.0)
+                button.title = " \(kRPM)"
+            } else {
+                button.title = " \(rpm)"
+            }
+            button.font = NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .medium)
+        }
+    }
+
     private func createAppleStyleFanIcon() -> NSImage {
-        // Try the refined native SF Symbol "fan" with precise Apple proportions
-        if let sfImage = NSImage(systemSymbolName: "fan", accessibilityDescription: "Breeze Fan Control") {
+        if let sfImage = NSImage(systemSymbolName: "fan", accessibilityDescription: "Breeze") {
             let config = NSImage.SymbolConfiguration(pointSize: 13.5, weight: .regular)
             if let configured = sfImage.withSymbolConfiguration(config) {
                 configured.isTemplate = true
@@ -1073,64 +1488,44 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
             }
         }
 
-        // Custom high-precision vector drawing fallback
         let size = NSSize(width: 18, height: 18)
         let image = NSImage(size: size, flipped: false) { rect in
             guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
-
             let center = CGPoint(x: 9, y: 9)
             let hubRadius: CGFloat = 1.75
             let bladeRadius: CGFloat = 6.2
 
-            ctx.setStrokeColor(NSColor.labelColor.cgColor)
             ctx.setFillColor(NSColor.labelColor.cgColor)
-            ctx.setLineWidth(1.25)
-            ctx.setLineCap(.round)
-            ctx.setLineJoin(.round)
-
-            // Draw 3 elegant Apple-style aerodynamic blades
             for i in 0..<3 {
                 let angle = CGFloat(i) * (2.0 * CGFloat.pi / 3.0) - (CGFloat.pi / 2.0)
                 let endAngle = angle + 0.65
-
-                let startX = center.x + hubRadius * cos(angle)
-                let startY = center.y + hubRadius * sin(angle)
-                let tipX = center.x + bladeRadius * cos(endAngle)
-                let tipY = center.y + bladeRadius * sin(endAngle)
-
-                let cpX = center.x + (bladeRadius * 0.7) * cos(angle + 0.35)
-                let cpY = center.y + (bladeRadius * 0.7) * sin(angle + 0.35)
-
                 let path = CGMutablePath()
-                path.move(to: CGPoint(x: startX, y: startY))
-                path.addQuadCurve(to: CGPoint(x: tipX, y: tipY), control: CGPoint(x: cpX, y: cpY))
+                path.move(to: CGPoint(x: center.x + hubRadius * cos(angle), y: center.y + hubRadius * sin(angle)))
+                path.addQuadCurve(to: CGPoint(x: center.x + bladeRadius * cos(endAngle), y: center.y + bladeRadius * sin(endAngle)),
+                                  control: CGPoint(x: center.x + (bladeRadius * 0.7) * cos(angle + 0.35), y: center.y + (bladeRadius * 0.7) * sin(angle + 0.35)))
                 path.addArc(center: center, radius: bladeRadius, startAngle: endAngle, endAngle: endAngle + 0.25, clockwise: false)
                 path.addLine(to: CGPoint(x: center.x + hubRadius * cos(angle + 0.4), y: center.y + hubRadius * sin(angle + 0.4)))
                 path.closeSubpath()
-
                 ctx.addPath(path)
                 ctx.fillPath()
             }
-
-            // Draw central hub
             ctx.addArc(center: center, radius: hubRadius, startAngle: 0, endAngle: 2 * .pi, clockwise: false)
             ctx.fillPath()
-
             return true
         }
-
         image.isTemplate = true
         return image
     }
 
     public func buildMenu() {
+        let loc = LocalizationManager.shared
         menu = NSMenu()
         menu.delegate = self
         menu.autoenablesItems = false
 
         // 1. Predefined Profiles
         for profile in FanManager.shared.profiles {
-            let item = NSMenuItem(title: profile.name, action: #selector(didSelectProfileItem(_:)), keyEquivalent: "")
+            let item = NSMenuItem(title: profile.localizedName, action: #selector(didSelectProfileItem(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = profile
             item.state = (FanManager.shared.activeProfile.id == profile.id) ? .on : .off
@@ -1140,11 +1535,11 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(NSMenuItem.separator())
 
         // 2. Custom Fan Speed submenu
-        let customSpeedItem = NSMenuItem(title: "Custom Fan Speed", action: nil, keyEquivalent: "")
-        let speedSubmenu = NSMenu(title: "Custom Fan Speed")
+        let customSpeedItem = NSMenuItem(title: loc.text(.customFanSpeed), action: nil, keyEquivalent: "")
+        let speedSubmenu = NSMenu(title: loc.text(.customFanSpeed))
 
         let speeds: [(title: String, pct: Float)] = [
-            ("Min Speed (0% · 1000 RPM)", 0),
+            ("Min (0% · 1000 RPM)", 0),
             ("25% · 1975 RPM", 25),
             ("40% · 2560 RPM", 40),
             ("50% · 2950 RPM", 50),
@@ -1161,7 +1556,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         }
 
         speedSubmenu.addItem(NSMenuItem.separator())
-        let promptRpmItem = NSMenuItem(title: "Enter Custom RPM...", action: #selector(didClickCustomRPM), keyEquivalent: "")
+        let promptRpmItem = NSMenuItem(title: loc.text(.enterCustomRPM), action: #selector(didClickCustomRPM), keyEquivalent: "")
         promptRpmItem.target = self
         speedSubmenu.addItem(promptRpmItem)
 
@@ -1169,11 +1564,11 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(customSpeedItem)
 
         // 3. Activate for/until submenu
-        let timerItem = NSMenuItem(title: "Activate for/until", action: nil, keyEquivalent: "")
-        let timerSubmenu = NSMenu(title: "Activate for/until")
+        let timerItem = NSMenuItem(title: loc.text(.activateForUntil), action: nil, keyEquivalent: "")
+        let timerSubmenu = NSMenu(title: loc.text(.activateForUntil))
 
         for duration in TimerDuration.allCases {
-            let item = NSMenuItem(title: duration.rawValue, action: #selector(didSelectDuration(_:)), keyEquivalent: "")
+            let item = NSMenuItem(title: duration.localizedTitle, action: #selector(didSelectDuration(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = duration
             item.state = (FanManager.shared.activeDuration == duration) ? .on : .off
@@ -1185,22 +1580,22 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
-        // 4. Live Fan Gauge (Progress bar, RPM, % readout, status text)
+        // 4. Live Fan Gauge & Control Center Slider View
         gaugeMenuItem = GaugeMenuItem()
         menu.addItem(gaugeMenuItem)
 
         menu.addItem(NSMenuItem.separator())
 
         // 5. Actions: Edit Profiles..., Settings..., Quit
-        let editProfilesItem = NSMenuItem(title: "Edit Profiles...", action: #selector(openEditProfiles), keyEquivalent: "")
+        let editProfilesItem = NSMenuItem(title: loc.text(.editProfiles), action: #selector(openEditProfiles), keyEquivalent: "")
         editProfilesItem.target = self
         menu.addItem(editProfilesItem)
 
-        let settingsItem = NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: "")
+        let settingsItem = NSMenuItem(title: loc.text(.settings), action: #selector(openSettings), keyEquivalent: "")
         settingsItem.target = self
         menu.addItem(settingsItem)
 
-        let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: loc.text(.quit), action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
     }
@@ -1212,7 +1607,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
             if let profile = item.representedObject as? FanProfile {
                 item.state = (FanManager.shared.activeProfile.id == profile.id) ? .on : .off
             }
-            if item.title == "Activate for/until", let submenu = item.submenu {
+            if let submenu = item.submenu {
                 for sub in submenu.items {
                     if let duration = sub.representedObject as? TimerDuration {
                         sub.state = (FanManager.shared.activeDuration == duration) ? .on : .off
@@ -1250,11 +1645,12 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func didClickCustomRPM() {
+        let loc = LocalizationManager.shared
         let alert = NSAlert()
-        alert.messageText = "Set Custom Fan Speed"
-        alert.informativeText = "Enter target RPM (Mac mini M5 Pro range: 1000 - 4900 RPM):"
+        alert.messageText = loc.text(.customFanSpeed)
+        alert.informativeText = loc.text(.enterRPMDetails)
         alert.alertStyle = .informational
-        alert.addButton(withTitle: "Apply")
+        alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "Cancel")
 
         let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
@@ -1377,7 +1773,7 @@ public struct ProfileEditorView: View {
                             }) {
                                 HStack {
                                     VStack(alignment: .leading, spacing: 2) {
-                                        Text(profile.name)
+                                        Text(profile.localizedName)
                                             .font(.system(size: 13, weight: .medium))
                                             .foregroundColor(isSelected ? .white : .primary)
                                         Text(profile.type.rawValue)
@@ -1418,7 +1814,7 @@ public struct ProfileEditorView: View {
                 if let profile = manager.profiles.first(where: { $0.id == viewModel.selectedProfileId }) {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
-                            Text(profile.name)
+                            Text(profile.localizedName)
                                 .font(.system(size: 20, weight: .bold))
                             Spacer()
                             Button("Activate Profile") {
@@ -1427,7 +1823,7 @@ public struct ProfileEditorView: View {
                             .buttonStyle(.borderedProminent)
                         }
 
-                        Text(profile.subtitle)
+                        Text(profile.localizedSubtitle)
                             .font(.system(size: 13))
                             .foregroundColor(.secondary)
                     }
@@ -1626,6 +2022,73 @@ public struct CurveGraphView: View {
 ## Plik: `Sources/Breeze/UI/Views/SettingsView.swift`
 ```swift
 import SwiftUI
+import AppKit
+
+public enum IconThemeChoice: String, CaseIterable, Identifiable, Sendable {
+    case automatic = "auto"
+    case dark = "dark"
+    case light = "light"
+
+    public var id: String { rawValue }
+}
+
+public final class SettingsViewModel: ObservableObject {
+    @Published public var selectedTab: SettingsTab = .profiles
+    @Published public var isInstallingHelper: Bool = false
+    @Published public var installMessage: String? = nil
+    @Published public var launchAtLogin: Bool = true
+
+    @Published public var selectedLanguage: AppLanguage = LocalizationManager.shared.currentLanguage {
+        didSet {
+            LocalizationManager.shared.currentLanguage = selectedLanguage
+            MenuBarController.shared.buildMenu()
+        }
+    }
+
+    @Published public var selectedIconTheme: IconThemeChoice = .automatic {
+        didSet {
+            UserDefaults.standard.set(selectedIconTheme.rawValue, forKey: "breeze_icon_theme")
+            applyIconTheme()
+        }
+    }
+
+    @Published public var selectedMenuStyle: MenuBarDisplayStyle = MenuBarController.shared.displayStyle {
+        didSet {
+            MenuBarController.shared.displayStyle = selectedMenuStyle
+        }
+    }
+
+    public init(initialTab: SettingsTab = .profiles) {
+        self.selectedTab = initialTab
+
+        if let savedTheme = UserDefaults.standard.string(forKey: "breeze_icon_theme"),
+           let theme = IconThemeChoice(rawValue: savedTheme) {
+            self.selectedIconTheme = theme
+        }
+        applyIconTheme()
+    }
+
+    public func applyIconTheme() {
+        let isDark: Bool
+        switch selectedIconTheme {
+        case .automatic:
+            isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        case .dark:
+            isDark = true
+        case .light:
+            isDark = false
+        }
+
+        let iconName = isDark ? "AppIcon-Dark.png" : "AppIcon-Light.png"
+        let resourcePath = Bundle.main.bundlePath + "/Contents/Resources/" + iconName
+        let fallbackPath = "/Users/dominik/.gemini/antigravity/scratch/Breeze/assets/" + iconName
+
+        let path = FileManager.default.fileExists(atPath: resourcePath) ? resourcePath : fallbackPath
+        if let iconImage = NSImage(contentsOfFile: path) {
+            NSApplication.shared.applicationIconImage = iconImage
+        }
+    }
+}
 
 public enum SettingsTab: String, CaseIterable, Identifiable {
     case profiles = "Profiles"
@@ -1634,6 +2097,15 @@ public enum SettingsTab: String, CaseIterable, Identifiable {
     case general = "General"
 
     public var id: String { rawValue }
+
+    public func localizedTitle(loc: LocalizationManager) -> String {
+        switch self {
+        case .profiles: return loc.text(.tabProfiles)
+        case .sensors: return loc.text(.tabSensors)
+        case .helper: return loc.text(.tabHelper)
+        case .general: return loc.text(.tabGeneral)
+        }
+    }
 
     public var icon: String {
         switch self {
@@ -1645,22 +2117,10 @@ public enum SettingsTab: String, CaseIterable, Identifiable {
     }
 }
 
-public final class SettingsViewModel: ObservableObject {
-    @Published public var selectedTab: SettingsTab = .profiles
-    @Published public var isInstallingHelper: Bool = false
-    @Published public var installMessage: String? = nil
-    @Published public var launchAtLogin: Bool = true
-    @Published public var showRPMInMenuBar: Bool = false
-    @Published public var showTempInMenuBar: Bool = false
-
-    public init(initialTab: SettingsTab = .profiles) {
-        self.selectedTab = initialTab
-    }
-}
-
 public struct SettingsView: View {
     @ObservedObject var manager = FanManager.shared
     @ObservedObject var viewModel: SettingsViewModel
+    @ObservedObject var loc = LocalizationManager.shared
 
     public init(viewModel: SettingsViewModel = SettingsViewModel()) {
         self.viewModel = viewModel
@@ -1668,13 +2128,13 @@ public struct SettingsView: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            // Apple-style tab bar header
+            // Segmented Header
             Picker("", selection: Binding(
                 get: { viewModel.selectedTab },
                 set: { viewModel.selectedTab = $0 }
             )) {
                 ForEach(SettingsTab.allCases) { tab in
-                    Label(tab.rawValue, systemImage: tab.icon).tag(tab)
+                    Label(tab.localizedTitle(loc: loc), systemImage: tab.icon).tag(tab)
                 }
             }
             .pickerStyle(.segmented)
@@ -1684,7 +2144,7 @@ public struct SettingsView: View {
 
             Divider()
 
-            // Tab Content
+            // Content
             Group {
                 switch viewModel.selectedTab {
                 case .profiles:
@@ -1698,24 +2158,21 @@ public struct SettingsView: View {
                 }
             }
         }
-        .frame(width: 620, height: 440)
+        .frame(width: 630, height: 460)
     }
 
-    // Hardware Sensors Tab
     private var sensorsTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                // Header hardware info
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Mac mini (Apple M5 Pro)")
+                    Text("Apple Silicon (\(manager.fans.count) \(manager.fans.count > 1 ? "Fans" : "Fan"))")
                         .font(.system(size: 16, weight: .bold))
-                    Text("Real-time telemetry polled via AppleSMC and IOKit hardware clients.")
+                    Text("Real-time telemetry via AppleSMC and IOKit hardware clients.")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
                 }
 
-                // Fan Telemetry Box
-                GroupBox(label: Label("Cooling Fans", systemImage: "fanblades")) {
+                GroupBox(label: Label("Cooling Fans (\(manager.fans.count))", systemImage: "fanblades")) {
                     ForEach(manager.fans) { fan in
                         VStack(alignment: .leading, spacing: 6) {
                             HStack {
@@ -1740,7 +2197,6 @@ public struct SettingsView: View {
                     }
                 }
 
-                // Temperatures Box
                 GroupBox(label: Label("Thermal Diode Matrix", systemImage: "thermometer.medium")) {
                     VStack(spacing: 8) {
                         ForEach(manager.sensorReadings) { sensor in
@@ -1766,7 +2222,6 @@ public struct SettingsView: View {
         }
     }
 
-    // Privileged Helper Tool Tab
     private var helperTab: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 12) {
@@ -1775,9 +2230,9 @@ public struct SettingsView: View {
                     .foregroundColor(manager.isHelperActive ? .green : .orange)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(manager.isHelperActive ? "Privileged Helper Daemon is Active" : "Helper Daemon Not Installed / Inactive")
+                    Text(manager.isHelperActive ? loc.text(.helperActive) : loc.text(.helperInactive))
                         .font(.system(size: 15, weight: .bold))
-                    Text(manager.isHelperActive ? "Low-level SMC fan speed override is fully operational." : "Apple Silicon requires root privileges to modify fan SMC keys.")
+                    Text("Low-level Apple Silicon SMC fan control via /var/run/breeze.sock")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
                 }
@@ -1785,10 +2240,10 @@ public struct SettingsView: View {
 
             Divider()
 
-            Text("How Apple Silicon Fan Control Works")
+            Text("Universal Multi-Fan & Watchdog Safety")
                 .font(.system(size: 13, weight: .semibold))
 
-            Text("On Apple Silicon (M1, M2, M3, M4, M5), macOS restricts writing to SMC fan control registers (F0Tg, F0md) to root (UID 0). Reading fan speeds and temperatures does not require privileges.\n\nBreeze uses a lightweight background helper daemon (`com.breeze.helper`) communicating through a local Unix domain socket. Once installed, you will never be prompted for your password again when changing fan profiles.")
+            Text("Breeze includes a background launchd helper daemon (`com.breeze.helper`). It manages all system fans (MacBook Pro dual fans, Mac mini, Mac Studio). A 30-second hardware watchdog automatically restores macOS native firmware control if the user application disconnects or crashes.")
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
                 .lineSpacing(3)
@@ -1808,7 +2263,7 @@ public struct SettingsView: View {
                         ProgressView()
                             .scaleEffect(0.7)
                     } else {
-                        Text(manager.isHelperActive ? "Reinstall Helper Daemon" : "Install Privileged Helper...")
+                        Text(manager.isHelperActive ? loc.text(.helperReinstallBtn) : loc.text(.helperInstallBtn))
                     }
                 }
                 .buttonStyle(.borderedProminent)
@@ -1818,37 +2273,76 @@ public struct SettingsView: View {
         .padding(24)
     }
 
-    // General Settings Tab
     private var generalTab: some View {
-        Form {
-            Section(header: Text("Appearance").font(.headline)) {
-                Toggle("Launch at Login", isOn: Binding(
-                    get: { viewModel.launchAtLogin },
-                    set: { viewModel.launchAtLogin = $0 }
-                ))
-                Toggle("Show Live RPM in Menu Bar", isOn: Binding(
-                    get: { viewModel.showRPMInMenuBar },
-                    set: { viewModel.showRPMInMenuBar = $0 }
-                ))
-                Toggle("Show SoC Temperature in Menu Bar", isOn: Binding(
-                    get: { viewModel.showTempInMenuBar },
-                    set: { viewModel.showTempInMenuBar = $0 }
-                ))
-            }
-
-            Section(header: Text("Safety & Thermal Governance").font(.headline)) {
-                HStack {
-                    Text("Emergency Failsafe Threshold:")
-                    Spacer()
-                    Text("88.0 °C")
-                        .foregroundColor(.secondary)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                // 1. Language Selection (EN, PL, ES)
+                GroupBox(label: Label(loc.text(.language), systemImage: "globe")) {
+                    Picker("", selection: Binding(
+                        get: { viewModel.selectedLanguage },
+                        set: { viewModel.selectedLanguage = $0 }
+                    )) {
+                        ForEach(AppLanguage.allCases) { lang in
+                            Text(lang.displayName).tag(lang)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.vertical, 4)
                 }
-                Text("If the SoC temperature exceeds 88°C, Breeze will automatically override any active profile and ramp fans to maximum.")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
+
+                // 2. App Icon Theme Selector (Automatic, Dark Glass, Frosted White)
+                GroupBox(label: Label(loc.text(.iconTheme), systemImage: "app.badge")) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Picker("", selection: Binding(
+                            get: { viewModel.selectedIconTheme },
+                            set: { viewModel.selectedIconTheme = $0 }
+                        )) {
+                            Text(loc.text(.iconThemeAuto)).tag(IconThemeChoice.automatic)
+                            Text(loc.text(.iconThemeDark)).tag(IconThemeChoice.dark)
+                            Text(loc.text(.iconThemeLight)).tag(IconThemeChoice.light)
+                        }
+                        .pickerStyle(.radioGroup)
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                // 3. Menu Bar Display Style Selector
+                GroupBox(label: Label(loc.text(.menuBarStyle), systemImage: "menubar.rectangle")) {
+                    Picker("", selection: Binding(
+                        get: { viewModel.selectedMenuStyle },
+                        set: { viewModel.selectedMenuStyle = $0 }
+                    )) {
+                        Text(loc.text(.menuBarIconOnly)).tag(MenuBarDisplayStyle.iconOnly)
+                        Text(loc.text(.menuBarIconTemp)).tag(MenuBarDisplayStyle.iconAndTemp)
+                        Text(loc.text(.menuBarIconRPM)).tag(MenuBarDisplayStyle.iconAndRPM)
+                    }
+                    .pickerStyle(.radioGroup)
+                    .padding(.vertical, 4)
+                }
+
+                // 4. Energy Optimization & Safety
+                GroupBox(label: Label(loc.text(.energyOptimization), systemImage: "leaf")) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(loc.text(.energyDesc))
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        Divider()
+                        HStack {
+                            Text(loc.text(.failsafeThreshold))
+                            Spacer()
+                            Text("86.0 °C")
+                                .fontWeight(.semibold)
+                                .foregroundColor(.red)
+                        }
+                        Text(loc.text(.failsafeDesc))
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.vertical, 4)
+                }
             }
+            .padding(20)
         }
-        .padding(24)
     }
 
     private func installHelper() {
@@ -1865,7 +2359,7 @@ public struct SettingsView: View {
                 viewModel.installMessage = "Helper daemon installed successfully!"
                 manager.checkHelperStatus()
             } else {
-                viewModel.installMessage = "Installation failed or was cancelled. You can also run the install script in Terminal."
+                viewModel.installMessage = "Installation failed or was cancelled."
             }
         }
     }
@@ -1889,21 +2383,12 @@ app.run()
 import Foundation
 import IOKit
 
-// SMC Structures for standalone helper binary
-struct SMCKeyData_vers {
-    var major: UInt8 = 0; var minor: UInt8 = 0; var build: UInt8 = 0; var reserved: UInt8 = 0; var release: UInt16 = 0
-}
-struct SMCKeyData_pLimitData {
-    var version: UInt16 = 0; var length: UInt16 = 0; var cpuPLimit: UInt32 = 0; var gpuPLimit: UInt32 = 0; var memPLimit: UInt32 = 0
-}
-struct SMCKeyData_keyInfo {
-    var dataSize: UInt32 = 0; var dataType: UInt32 = 0; var dataAttributes: UInt8 = 0
-}
+struct SMCKeyData_vers { var major: UInt8 = 0; var minor: UInt8 = 0; var build: UInt8 = 0; var reserved: UInt8 = 0; var release: UInt16 = 0 }
+struct SMCKeyData_pLimitData { var version: UInt16 = 0; var length: UInt16 = 0; var cpuPLimit: UInt32 = 0; var gpuPLimit: UInt32 = 0; var memPLimit: UInt32 = 0 }
+struct SMCKeyData_keyInfo { var dataSize: UInt32 = 0; var dataType: UInt32 = 0; var dataAttributes: UInt8 = 0 }
 struct SMCParamStruct {
     var key: UInt32 = 0
-    var vers = SMCKeyData_vers()
-    var pLimitData = SMCKeyData_pLimitData()
-    var keyInfo = SMCKeyData_keyInfo()
+    var vers = SMCKeyData_vers(); var pLimitData = SMCKeyData_pLimitData(); var keyInfo = SMCKeyData_keyInfo()
     var padding: UInt16 = 0; var result: UInt8 = 0; var status: UInt8 = 0; var data8: UInt8 = 0; var data32: UInt32 = 0
     var bytes: (UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
                 UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
@@ -1924,47 +2409,50 @@ final class DirectSMCWriter {
 
     init() {
         let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSMC"))
-        if service != 0 {
-            IOServiceOpen(service, mach_task_self_, 0, &connection)
-            IOObjectRelease(service)
-        }
+        if service != 0 { IOServiceOpen(service, mach_task_self_, 0, &connection); IOObjectRelease(service) }
     }
-
-    deinit {
-        if connection != 0 {
-            IOServiceClose(connection)
-        }
-    }
+    deinit { if connection != 0 { IOServiceClose(connection) } }
 
     private func getKeyInfo(keyStr: String) -> (dataType: UInt32, dataSize: UInt32)? {
         guard connection != 0 else { return nil }
-        var input = SMCParamStruct()
-        var output = SMCParamStruct()
-        input.key = fourCharCode(keyStr)
-        input.data8 = 9
+        var input = SMCParamStruct(); var output = SMCParamStruct()
+        input.key = fourCharCode(keyStr); input.data8 = 9
         let inSize = MemoryLayout<SMCParamStruct>.stride
         var outSize = MemoryLayout<SMCParamStruct>.stride
         let res = IOConnectCallStructMethod(connection, 2, &input, inSize, &output, &outSize)
-        if res == KERN_SUCCESS && output.result == 0 {
-            return (output.keyInfo.dataType, output.keyInfo.dataSize)
+        return (res == KERN_SUCCESS && output.result == 0) ? (output.keyInfo.dataType, output.keyInfo.dataSize) : nil
+    }
+
+    func readUInt8(keyStr: String) -> UInt8? {
+        guard connection != 0, let info = getKeyInfo(keyStr: keyStr) else { return nil }
+        var input = SMCParamStruct(); var output = SMCParamStruct()
+        input.key = fourCharCode(keyStr); input.data8 = 5; input.keyInfo.dataSize = info.dataSize
+        let inSize = MemoryLayout<SMCParamStruct>.stride
+        var outSize = MemoryLayout<SMCParamStruct>.stride
+        let res = IOConnectCallStructMethod(connection, 2, &input, inSize, &output, &outSize)
+        guard res == KERN_SUCCESS && output.result == 0 else { return nil }
+        let mirror = Mirror(reflecting: output.bytes)
+        var bytes = [UInt8]()
+        for (_, child) in mirror.children {
+            if bytes.count < Int(info.dataSize) { bytes.append(child as! UInt8) }
         }
-        return nil
+        return bytes.first
+    }
+
+    func getFanCount() -> Int {
+        if let count = readUInt8(keyStr: "FNum") {
+            return max(1, Int(count))
+        }
+        return 1
     }
 
     func writeBytes(keyStr: String, bytes: [UInt8]) -> Bool {
         guard connection != 0, let info = getKeyInfo(keyStr: keyStr) else { return false }
-        var input = SMCParamStruct()
-        var output = SMCParamStruct()
-        input.key = fourCharCode(keyStr)
-        input.data8 = 6 // SMC_CMD_WRITE_BYTES
-        input.keyInfo.dataSize = info.dataSize
-
+        var input = SMCParamStruct(); var output = SMCParamStruct()
+        input.key = fourCharCode(keyStr); input.data8 = 6; input.keyInfo.dataSize = info.dataSize
         withUnsafeMutableBytes(of: &input.bytes) { rawPtr in
-            for i in 0..<min(bytes.count, Int(info.dataSize)) {
-                rawPtr[i] = bytes[i]
-            }
+            for i in 0..<min(bytes.count, Int(info.dataSize)) { rawPtr[i] = bytes[i] }
         }
-
         let inSize = MemoryLayout<SMCParamStruct>.stride
         var outSize = MemoryLayout<SMCParamStruct>.stride
         let res = IOConnectCallStructMethod(connection, 2, &input, inSize, &output, &outSize)
@@ -1973,9 +2461,7 @@ final class DirectSMCWriter {
 
     func setFanMode(fanIndex: Int, manual: Bool) -> Bool {
         let val: UInt8 = manual ? 1 : 0
-        let r1 = writeBytes(keyStr: "F\(fanIndex)md", bytes: [val])
-        let r2 = writeBytes(keyStr: "F\(fanIndex)Md", bytes: [val])
-        return r1 || r2
+        return writeBytes(keyStr: "F\(fanIndex)md", bytes: [val]) || writeBytes(keyStr: "F\(fanIndex)Md", bytes: [val])
     }
 
     func setFanSpeed(fanIndex: Int, targetRPM: Float) -> Bool {
@@ -1988,9 +2474,15 @@ final class DirectSMCWriter {
     func resetToSystem(fanIndex: Int) -> Bool {
         return setFanMode(fanIndex: fanIndex, manual: false)
     }
+
+    func resetAllFansToSystem() {
+        let count = getFanCount()
+        for i in 0..<count {
+            _ = resetToSystem(fanIndex: i)
+        }
+    }
 }
 
-// Unix Domain Socket Daemon with 30s Safety Watchdog
 final class BreezeDaemon {
     private let socketPath = "/var/run/breeze.sock"
     private var lastHeartbeat = Date()
@@ -1999,62 +2491,39 @@ final class BreezeDaemon {
     func start() {
         unlink(socketPath)
 
-        // Setup clean shutdown on SIGINT and SIGTERM
         signal(SIGINT) { _ in
-            _ = DirectSMCWriter.shared.resetToSystem(fanIndex: 0)
+            DirectSMCWriter.shared.resetAllFansToSystem()
             exit(0)
         }
         signal(SIGTERM) { _ in
-            _ = DirectSMCWriter.shared.resetToSystem(fanIndex: 0)
+            DirectSMCWriter.shared.resetAllFansToSystem()
             exit(0)
         }
 
         let serverFd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard serverFd >= 0 else {
-            perror("socket")
-            exit(1)
-        }
+        guard serverFd >= 0 else { exit(1) }
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
-            let raw = UnsafeMutableRawPointer(ptr)
-            socketPath.withCString { cstr in
-                _ = strcpy(raw.assumingMemoryBound(to: CChar.self), cstr)
-            }
+            socketPath.withCString { _ = strcpy(UnsafeMutableRawPointer(ptr).assumingMemoryBound(to: CChar.self), $0) }
         }
 
         let addrLen = socklen_t(MemoryLayout<sockaddr_un>.size)
-        let bindRes = withUnsafePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
-                bind(serverFd, saPtr, addrLen)
-            }
-        }
-
-        guard bindRes == 0 else {
-            perror("bind")
-            exit(1)
-        }
+        guard withUnsafePointer(to: &addr, { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(serverFd, $0, addrLen) }
+        }) == 0 else { exit(1) }
 
         chmod(socketPath, 0o666)
+        guard listen(serverFd, 10) == 0 else { exit(1) }
 
-        guard listen(serverFd, 10) == 0 else {
-            perror("listen")
-            exit(1)
-        }
-
-        print("BreezeHelper daemon running on \(socketPath)")
-
-        // Background safety watchdog timer:
-        // If client app crashes or disconnects while in manual mode,
-        // automatically restore macOS system thermal governance after 30s
+        // 30-Second Hardware Watchdog across ALL fans
         DispatchQueue.global(qos: .utility).async { [weak self] in
             while true {
                 Thread.sleep(forTimeInterval: 5.0)
                 guard let self = self else { return }
                 if self.isManualOverrideActive && Date().timeIntervalSince(self.lastHeartbeat) > 30.0 {
-                    print("[Safety Watchdog] Client timeout (>30s) - restoring System fan control")
-                    _ = DirectSMCWriter.shared.resetToSystem(fanIndex: 0)
+                    DirectSMCWriter.shared.resetAllFansToSystem()
                     self.isManualOverrideActive = false
                 }
             }
@@ -2063,63 +2532,55 @@ final class BreezeDaemon {
         while true {
             let clientFd = accept(serverFd, nil, nil)
             guard clientFd >= 0 else { continue }
-
             var buffer = [UInt8](repeating: 0, count: 1024)
             let bytesRead = read(clientFd, &buffer, 1024)
-            if bytesRead > 0 {
-                if let commandStr = String(bytes: buffer.prefix(bytesRead), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) {
-                    let parts = commandStr.components(separatedBy: " ")
-                    var response = "ERROR\n"
+            if bytesRead > 0, let cmd = String(bytes: buffer.prefix(bytesRead), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) {
+                let parts = cmd.components(separatedBy: " ")
+                var resp = "ERROR\n"
 
-                    if parts.first == "SET_SPEED", parts.count >= 3,
-                       let fanIdx = Int(parts[1]), let rpm = Float(parts[2]) {
-                        self.lastHeartbeat = Date()
-                        self.isManualOverrideActive = true
-                        let success = DirectSMCWriter.shared.setFanSpeed(fanIndex: fanIdx, targetRPM: rpm)
-                        response = success ? "OK\n" : "FAIL_SMC\n"
-                    } else if parts.first == "SET_SYSTEM", parts.count >= 2,
-                              let fanIdx = Int(parts[1]) {
-                        self.isManualOverrideActive = false
-                        let success = DirectSMCWriter.shared.resetToSystem(fanIndex: fanIdx)
-                        response = success ? "OK\n" : "FAIL_SMC\n"
-                    } else if parts.first == "HEARTBEAT" || parts.first == "PING" {
-                        self.lastHeartbeat = Date()
-                        response = "PONG\n"
+                if parts.first == "SET_SPEED", parts.count >= 3, let idx = Int(parts[1]), let rpm = Float(parts[2]) {
+                    self.lastHeartbeat = Date(); self.isManualOverrideActive = true
+                    resp = DirectSMCWriter.shared.setFanSpeed(fanIndex: idx, targetRPM: rpm) ? "OK\n" : "FAIL_SMC\n"
+                } else if parts.first == "SET_SPEED_ALL", parts.count >= 2, let rpm = Float(parts[1]) {
+                    self.lastHeartbeat = Date(); self.isManualOverrideActive = true
+                    let count = DirectSMCWriter.shared.getFanCount()
+                    var allOk = true
+                    for i in 0..<count {
+                        if !DirectSMCWriter.shared.setFanSpeed(fanIndex: i, targetRPM: rpm) { allOk = false }
                     }
-
-                    _ = response.withCString { cstr in
-                        write(clientFd, cstr, strlen(cstr))
-                    }
+                    resp = allOk ? "OK\n" : "FAIL_SMC\n"
+                } else if parts.first == "SET_SYSTEM", parts.count >= 2, let idx = Int(parts[1]) {
+                    self.isManualOverrideActive = false
+                    resp = DirectSMCWriter.shared.resetToSystem(fanIndex: idx) ? "OK\n" : "FAIL_SMC\n"
+                } else if parts.first == "SET_SYSTEM_ALL" {
+                    self.isManualOverrideActive = false
+                    DirectSMCWriter.shared.resetAllFansToSystem()
+                    resp = "OK\n"
+                } else if parts.first == "HEARTBEAT" || parts.first == "PING" {
+                    self.lastHeartbeat = Date(); resp = "PONG\n"
                 }
+
+                _ = resp.withCString { write(clientFd, $0, strlen($0)) }
             }
             close(clientFd)
         }
     }
 }
 
-// CLI handler
 let args = CommandLine.arguments
 if args.count > 1 {
     switch args[1] {
-    case "daemon":
-        BreezeDaemon().start()
+    case "daemon": BreezeDaemon().start()
     case "set-speed":
-        if args.count >= 4, let fanIdx = Int(args[2]), let rpm = Float(args[3]) {
-            let ok = DirectSMCWriter.shared.setFanSpeed(fanIndex: fanIdx, targetRPM: rpm)
-            print(ok ? "SUCCESS" : "ERROR")
-            exit(ok ? 0 : 1)
+        if args.count >= 4, let idx = Int(args[2]), let rpm = Float(args[3]) {
+            exit(DirectSMCWriter.shared.setFanSpeed(fanIndex: idx, targetRPM: rpm) ? 0 : 1)
         }
     case "set-system":
-        if args.count >= 3, let fanIdx = Int(args[2]) {
-            let ok = DirectSMCWriter.shared.resetToSystem(fanIndex: fanIdx)
-            print(ok ? "SUCCESS" : "ERROR")
-            exit(ok ? 0 : 1)
+        if args.count >= 3, let idx = Int(args[2]) {
+            exit(DirectSMCWriter.shared.resetToSystem(fanIndex: idx) ? 0 : 1)
         }
-    case "ping":
-        print("BreezeHelper OK")
-        exit(0)
-    default:
-        print("Usage: breeze-helper [daemon | set-speed <fan> <rpm> | set-system <fan> | ping]")
+    case "ping": print("BreezeHelper OK"); exit(0)
+    default: break
     }
 } else {
     BreezeDaemon().start()
@@ -2160,6 +2621,7 @@ swiftc -O -framework Cocoa -framework SwiftUI -framework IOKit \
     -o "$ROOT_DIR/Breeze" \
     "$ROOT_DIR/Sources/Breeze/SMC/SMCEngine.swift" \
     "$ROOT_DIR/Sources/Breeze/Models/FanProfile.swift" \
+    "$ROOT_DIR/Sources/Breeze/Services/LocalizationManager.swift" \
     "$ROOT_DIR/Sources/Breeze/Services/HelperClient.swift" \
     "$ROOT_DIR/Sources/Breeze/Services/FanManager.swift" \
     "$ROOT_DIR/Sources/Breeze/UI/GaugeMenuItemView.swift" \
@@ -2401,23 +2863,6 @@ echo "Socket: /var/run/breeze.sock"
 ```
 
 ---
-## Skrypt: `scripts/check_dark_png.swift`
-```bash
-import AppKit
-
-let path = "/Users/dominik/.gemini/antigravity/scratch/Breeze/assets/AppIcon-Dark.png"
-let img = NSImage(contentsOfFile: path)!
-let rep = NSBitmapImageRep(data: img.tiffRepresentation!)!
-
-print("Image size: \(rep.pixelsWide)x\(rep.pixelsHigh)")
-// Sample from edge to center along diagonal (x=y)
-for i in stride(from: 50, to: 512, by: 40) {
-    let c = rep.colorAt(x: i, y: i)!
-    print("Diagonal at (\(i),\(i)): R=\(String(format: "%.2f", c.redComponent)) G=\(String(format: "%.2f", c.greenComponent)) B=\(String(format: "%.2f", c.blueComponent)) A=\(String(format: "%.2f", c.alphaComponent))")
-}
-```
-
----
 ## Skrypt: `scripts/generate_icon.swift`
 ```bash
 import AppKit
@@ -2626,94 +3071,92 @@ print("Generated all icon sizes in \(iconsetPath)")
 ```
 
 ---
-## Skrypt: `scripts/inspect_user_screenshot.swift`
-```bash
-import AppKit
-
-let path = "/Users/dominik/.gemini/antigravity/brain/279c540e-fa02-4786-ba13-c3af16ead743/.user_uploaded/media_1794167361793_52a81a44.png"
-let img = NSImage(contentsOfFile: path)!
-let rep = NSBitmapImageRep(data: img.tiffRepresentation!)!
-
-print("Screenshot dimensions: \(rep.pixelsWide)x\(rep.pixelsHigh)")
-
-// Let's find where the white card is
-for y in stride(from: 150, to: 350, by: 20) {
-    let c = rep.colorAt(x: 120, y: y)!
-    print("x=120, y=\(y): R=\(String(format: "%.2f", c.redComponent)) G=\(String(format: "%.2f", c.greenComponent)) B=\(String(format: "%.2f", c.blueComponent))")
-}
-```
-
----
 ## Skrypt: `scripts/process_user_icons.swift`
 ```bash
 import AppKit
 import CoreGraphics
 
 let inputPath = "/Users/dominik/.gemini/antigravity/brain/279c540e-fa02-4786-ba13-c3af16ead743/.user_uploaded/media_1794164265924_01a1d535.jpg"
-guard let sourceImage = NSImage(contentsOfFile: inputPath),
-      let tiffData = sourceImage.tiffRepresentation,
-      let bitmap = NSBitmapImageRep(data: tiffData),
-      let cgImage = bitmap.cgImage else {
-    print("Failed to load source image")
+guard let sourceImage = NSImage(contentsOfFile: inputPath) else {
+    print("Failed to load source image at \(inputPath)")
     exit(1)
 }
 
-func renderNativeAppleSquircleIcon(centerX: CGFloat, centerY: CGFloat, sourceSize: CGFloat, targetCanvasSize: CGFloat = 1024.0) -> NSImage {
-    // 1. Crop exactly the icon content from source
-    let srcRect = CGRect(x: centerX - sourceSize/2, y: centerY - sourceSize/2, width: sourceSize, height: sourceSize)
-    let croppedCg = cgImage.cropping(to: srcRect)!
+func renderPixelPerfectIcon(cropRect: NSRect, isDark: Bool) -> NSImage {
+    // 1. Extract crop using NSImage (proper macOS upright coordinate system)
+    let cropped = NSImage(size: cropRect.size)
+    cropped.lockFocus()
+    sourceImage.draw(in: NSRect(origin: .zero, size: cropRect.size),
+                     from: cropRect,
+                     operation: .copy,
+                     fraction: 1.0)
+    cropped.unlockFocus()
 
-    // 2. Apple HIG standard icon proportions:
-    // Canvas is 1024x1024, squircle is ~834x834 pt, corner radius is 0.2237 * width (~186.5 pt)
-    let squircleSize: CGFloat = 834.0
+    // 2. Target canvas 1024x1024
+    let targetSize = NSSize(width: 1024, height: 1024)
+    let finalImage = NSImage(size: targetSize)
+    finalImage.lockFocus()
+
+    guard let ctx = NSGraphicsContext.current?.cgContext else {
+        finalImage.unlockFocus()
+        return finalImage
+    }
+
+    // Official Apple HIG macOS squircle specification:
+    // 824x824 pt on 1024x1024 canvas (corner radius = 824 * 0.2237 = 184.3 pt)
+    let squircleSize: CGFloat = 824.0
     let cornerRadius: CGFloat = squircleSize * 0.2237
-    let squircleOrigin = CGPoint(
-        x: (targetCanvasSize - squircleSize) / 2.0,
-        y: (targetCanvasSize - squircleSize) / 2.0 + 8.0 // standard +8pt optical centering for drop shadow
+    let squircleRect = NSRect(
+        x: (1024.0 - squircleSize) / 2.0,
+        y: (1024.0 - squircleSize) / 2.0 + 8.0, // +8pt optical centering
+        width: squircleSize,
+        height: squircleSize
     )
-    let squircleRect = CGRect(origin: squircleOrigin, size: CGSize(width: squircleSize, height: squircleSize))
 
-    let colorSpace = CGColorSpaceCreateDeviceRGB()
-    let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
-    let ctx = CGContext(data: nil, width: Int(targetCanvasSize), height: Int(targetCanvasSize), bitsPerComponent: 8, bytesPerRow: Int(targetCanvasSize) * 4, space: colorSpace, bitmapInfo: bitmapInfo)!
+    let path = NSBezierPath(roundedRect: squircleRect, xRadius: cornerRadius, yRadius: cornerRadius)
 
-    // 3. Render authentic macOS icon drop shadow
+    // A. Subtle neutral black drop shadow (renders beautifully on BOTH dark and light backgrounds!)
     ctx.saveGState()
-    ctx.setShadow(offset: CGSize(width: 0, height: -18), blur: 24, color: NSColor.black.withAlphaComponent(0.32).cgColor)
-    let squirclePath = CGPath(roundedRect: squircleRect, cornerWidth: cornerRadius, cornerHeight: cornerRadius, transform: nil)
-    ctx.addPath(squirclePath)
-    ctx.setFillColor(NSColor.black.cgColor)
-    ctx.fillPath()
+    ctx.setShadow(offset: CGSize(width: 0, height: -16), blur: 24, color: NSColor.black.withAlphaComponent(0.40).cgColor)
+    NSColor.black.setFill()
+    path.fill()
     ctx.restoreGState()
 
-    // 4. Clip to continuous Apple squircle path to completely eliminate outer background white artifacts
+    // B. Clip strictly to the continuous squircle path (zero white background bleed)
     ctx.saveGState()
-    ctx.addPath(squirclePath)
-    ctx.clip()
+    path.addClip()
 
-    // 5. Draw the user's high-res icon perfectly centered into the squircle
-    ctx.interpolationQuality = .high
-    ctx.draw(croppedCg, in: squircleRect)
+    // Draw the cropped icon slightly scaled (-3pt inset to cover edges)
+    let drawRect = squircleRect.insetBy(dx: -3, dy: -3)
+    cropped.draw(in: drawRect, from: .zero, operation: .copy, fraction: 1.0)
 
-    // 6. Subtle inner rim stroke for enhanced glass depth
-    ctx.setLineWidth(1.5)
-    ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.25).cgColor)
-    ctx.addPath(squirclePath)
-    ctx.strokePath()
+    // C. Elegant glass rim outline
+    if isDark {
+        NSColor(white: 1.0, alpha: 0.15).setStroke()
+    } else {
+        NSColor(white: 1.0, alpha: 0.35).setStroke()
+    }
+    path.lineWidth = 1.5
+    path.stroke()
 
     ctx.restoreGState()
 
-    let resultCg = ctx.makeImage()!
-    return NSImage(cgImage: resultCg, size: NSSize(width: targetCanvasSize, height: targetCanvasSize))
+    finalImage.unlockFocus()
+    return finalImage
 }
 
 let rootDir = "/Users/dominik/.gemini/antigravity/scratch/Breeze"
 let assetsDir = "\(rootDir)/assets"
 try? FileManager.default.createDirectory(atPath: assetsDir, withIntermediateDirectories: true)
 
-// Render Light and Dark icons with exact Apple HIG squircle geometry
-let light1024 = renderNativeAppleSquircleIcon(centerX: 280.5, centerY: 264.5, sourceSize: 406.0)
-let dark1024 = renderNativeAppleSquircleIcon(centerX: 751.0, centerY: 265.5, sourceSize: 406.0)
+// In NSImage coordinate system (y=0 at bottom):
+// Dark squircle body:
+let darkCrop = NSRect(x: 556, y: 84, width: 380, height: 362)
+let dark1024 = renderPixelPerfectIcon(cropRect: darkCrop, isDark: true)
+
+// Light squircle body:
+let lightCrop = NSRect(x: 82, y: 56, width: 397, height: 391)
+let light1024 = renderPixelPerfectIcon(cropRect: lightCrop, isDark: false)
 
 func savePNG(image: NSImage, path: String) {
     if let tiff = image.tiffRepresentation,
@@ -2723,11 +3166,11 @@ func savePNG(image: NSImage, path: String) {
     }
 }
 
-savePNG(image: light1024, path: "\(assetsDir)/AppIcon-Light.png")
 savePNG(image: dark1024, path: "\(assetsDir)/AppIcon-Dark.png")
+savePNG(image: light1024, path: "\(assetsDir)/AppIcon-Light.png")
 savePNG(image: dark1024, path: "\(rootDir)/AppIcon_preview.png")
 
-// Generate standard Apple iconsets
+// Generate Apple standard iconsets
 func generateIconset(image: NSImage, iconsetName: String) {
     let fm = FileManager.default
     let iconsetPath = "\(rootDir)/\(iconsetName).iconset"
@@ -2761,6 +3204,6 @@ generateIconset(image: dark1024, iconsetName: "AppIcon-Dark")
 generateIconset(image: light1024, iconsetName: "AppIcon-Light")
 generateIconset(image: dark1024, iconsetName: "AppIcon")
 
-print("Generated pixel-perfect native macOS squircle iconsets!")
+print("Generated clean, halo-free icons!")
 ```
 

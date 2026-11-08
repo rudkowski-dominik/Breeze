@@ -3,6 +3,7 @@ import SwiftUI
 
 public struct FanGaugeSwiftUIView: View {
     @ObservedObject var manager = FanManager.shared
+    @ObservedObject var loc = LocalizationManager.shared
 
     public init() {}
 
@@ -11,7 +12,7 @@ public struct FanGaugeSwiftUIView: View {
         let pct = fan?.percentage ?? 0
         let rpm = fan?.actualRPM ?? 0
 
-        VStack(spacing: 7) {
+        VStack(spacing: 9) {
             // Sleek horizontal progress bar
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
@@ -22,8 +23,8 @@ public struct FanGaugeSwiftUIView: View {
                         .fill(
                             LinearGradient(
                                 colors: [
-                                    Color.white.opacity(0.85),
-                                    Color.white.opacity(0.95)
+                                    Color.cyan.opacity(0.85),
+                                    Color.blue.opacity(0.95)
                                 ],
                                 startPoint: .leading,
                                 endPoint: .trailing
@@ -33,12 +34,40 @@ public struct FanGaugeSwiftUIView: View {
                 }
             }
             .frame(height: 5)
-            .padding(.horizontal, 24)
+            .padding(.horizontal, 22)
 
             // Fan Speed & RPM readout
-            Text("\(Int(round(pct)))% · \(Int(round(rpm))) RPM")
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .foregroundColor(.primary)
+            HStack(spacing: 6) {
+                Text("\(Int(round(pct)))% · \(Int(round(rpm))) RPM")
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundColor(.primary)
+
+                if manager.fans.count > 1 {
+                    Text("(\(manager.fans.count) Fans)")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            // Interactive Apple Control Center Style Slider
+            HStack(spacing: 10) {
+                Image(systemName: "fan")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+
+                Slider(value: Binding(
+                    get: { Double(pct) },
+                    set: { newVal in
+                        manager.setCustomFixedSpeed(percentage: Float(newVal))
+                    }
+                ), in: 0...100)
+                .controlSize(.small)
+
+                Image(systemName: "fan.fill")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 18)
 
             // Status message
             Text(manager.statusMessage)
@@ -46,10 +75,10 @@ public struct FanGaugeSwiftUIView: View {
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .lineLimit(2)
-                .padding(.horizontal, 16)
+                .padding(.horizontal, 14)
         }
         .padding(.vertical, 8)
-        .frame(width: 250)
+        .frame(width: 260)
     }
 }
 
@@ -60,7 +89,7 @@ public final class GaugeMenuItem: NSMenuItem {
         let swiftUIView = FanGaugeSwiftUIView()
         self.hostingView = NSHostingView(rootView: swiftUIView)
         super.init(title: "", action: nil, keyEquivalent: "")
-        self.hostingView.frame = NSRect(x: 0, y: 0, width: 250, height: 74)
+        self.hostingView.frame = NSRect(x: 0, y: 0, width: 260, height: 102)
         self.view = hostingView
     }
 

@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import AppKit
 
 public enum TimerDuration: String, CaseIterable, Identifiable, Sendable {
     case indefinitely = "Indefinitely"
@@ -34,18 +35,18 @@ public final class FanManager: ObservableObject, @unchecked Sendable {
     @Published public var activeDuration: TimerDuration = .indefinitely
     @Published public var timerRemainingText: String? = nil
     @Published public var isHelperActive: Bool = false
+    @Published public var isSystemSleeping: Bool = false
 
     private var monitorTimer: Timer?
     private var durationTimer: Timer?
     private var expiryDate: Date?
 
-    // Acoustic Stabilization & Slew Rate Controller:
-    // Prevents fan surging, hunting, and revving
+    // Slew rate controller & acoustic stabilization
     private var currentOutputRPM: Float?
     private var cooldownUntil: Date = Date.distantPast
-    private let maxRampDownPerTick: Float = 75.0 // RPM per 1.5s (~50 RPM/s)
-    private let maxRampUpPerTick: Float = 150.0  // Smooth ramp up
-    private let hysteresisHoldDuration: TimeInterval = 7.0 // Hold high speed 7s before ramping down
+    private let maxRampDownPerTick: Float = 75.0
+    private let maxRampUpPerTick: Float = 150.0
+    private let hysteresisHoldDuration: TimeInterval = 7.0
 
     private init() {
         let detectedFans = SMCEngine.shared.getFans()
@@ -58,18 +59,63 @@ public final class FanManager: ObservableObject, @unchecked Sendable {
         self.fans = detectedFans
 
         updateTelemetry()
-        startMonitoringLoop()
+        setupPowerAndSleepObservers()
+        startAdaptiveMonitoringLoop()
     }
 
-    public func startMonitoringLoop() {
+    // MARK: - Energy Optimization & Sleep Observers
+    private func setupPowerAndSleepObservers() {
+        let nc = NSWorkspace.shared.notificationCenter
+
+        // 1. System Will Sleep -> Safe firmware handoff & pause timers
+        nc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self = self else { return }
+            self.isSystemSleeping = true
+            self.monitorTimer?.invalidate()
+            self.monitorTimer = nil
+
+            // Release all fans back to native macOS firmware before sleep
+            for fan in self.fans {
+                _ = HelperClient.shared.resetToSystem(fanIndex: fan.id)
+            }
+        }
+
+        // 2. System Did Wake -> Restore telemetry & reapply profile
+        nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self = self else { return }
+            self.isSystemSleeping = false
+            self.startAdaptiveMonitoringLoop()
+            self.evaluateActiveProfile(force: true)
+        }
+
+        // 3. Screen Sleep -> Throttle polling to save energy
+        nc.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self = self, !self.isSystemSleeping else { return }
+            self.restartMonitoringTimer(interval: 10.0) // 10s idle interval
+        }
+
+        // 4. Screen Wake -> Resume normal adaptive polling
+        nc.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self = self, !self.isSystemSleeping else { return }
+            self.startAdaptiveMonitoringLoop()
+        }
+    }
+
+    public func startAdaptiveMonitoringLoop() {
+        // Adaptive polling interval: 4s when system manages, 1.5s when active curve regulates
+        let interval: TimeInterval = (activeProfile.type == .system) ? 4.0 : 1.5
+        restartMonitoringTimer(interval: interval)
+    }
+
+    private func restartMonitoringTimer(interval: TimeInterval) {
         monitorTimer?.invalidate()
-        // Run loop every 1.5s
-        monitorTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+        monitorTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.tick()
         }
     }
 
     private func tick() {
+        guard !isSystemSleeping else { return }
         updateTelemetry()
         checkHelperStatus()
         evaluateActiveProfile()
@@ -79,9 +125,7 @@ public final class FanManager: ObservableObject, @unchecked Sendable {
     public func checkHelperStatus() {
         let running = HelperClient.shared.pingDaemon()
         if running != isHelperActive {
-            DispatchQueue.main.async {
-                self.isHelperActive = running
-            }
+            DispatchQueue.main.async { self.isHelperActive = running }
         }
     }
 
@@ -89,6 +133,7 @@ public final class FanManager: ObservableObject, @unchecked Sendable {
         let updatedFans = SMCEngine.shared.getFans()
         let temp = SMCEngine.shared.getPrimaryTemperature()
         let sensors = SMCEngine.shared.getTemperatureSensors()
+        let loc = LocalizationManager.shared
 
         DispatchQueue.main.async {
             self.fans = updatedFans
@@ -97,16 +142,15 @@ public final class FanManager: ObservableObject, @unchecked Sendable {
 
             if let fan = updatedFans.first {
                 if self.activeProfile.type == .system {
-                    if fan.isManual {
-                        self.statusMessage = "Monitoring · external manual control observed"
-                    } else {
-                        self.statusMessage = "System Managed · macOS Thermal Governance"
-                    }
+                    self.statusMessage = fan.isManual ?
+                        loc.text(.monitoringExternal) :
+                        loc.text(.systemManaged)
                 } else {
-                    if let remaining = self.timerRemainingText {
-                        self.statusMessage = "\(self.activeProfile.name) (\(remaining)) · SoC \(String(format: "%.1f", temp))°C"
+                    let tempStr = String(format: "%.1f", temp)
+                    if let rem = self.timerRemainingText {
+                        self.statusMessage = "\(self.activeProfile.name) (\(rem)) · SoC \(tempStr)°C"
                     } else {
-                        self.statusMessage = "\(self.activeProfile.name) Active · SoC \(String(format: "%.1f", temp))°C"
+                        self.statusMessage = loc.text(.activeProfileText(self.activeProfile.name, tempStr))
                     }
                 }
             }
@@ -116,6 +160,7 @@ public final class FanManager: ObservableObject, @unchecked Sendable {
     public func selectProfile(_ profile: FanProfile) {
         activeProfile = profile
         currentOutputRPM = nil
+        startAdaptiveMonitoringLoop() // Adjust interval dynamically
         evaluateActiveProfile(force: true)
     }
 
@@ -123,9 +168,8 @@ public final class FanManager: ObservableObject, @unchecked Sendable {
         activeDuration = duration
         durationTimer?.invalidate()
         durationTimer = nil
-
-        if let seconds = duration.seconds {
-            expiryDate = Date().addingTimeInterval(seconds)
+        if let sec = duration.seconds {
+            expiryDate = Date().addingTimeInterval(sec)
             durationTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
                 self?.checkTimerExpiry()
             }
@@ -139,7 +183,7 @@ public final class FanManager: ObservableObject, @unchecked Sendable {
         guard let fan = fans.first else { return }
         let clampedPct = max(0, min(100, percentage))
         let rpm = fan.minRPM + ((fan.maxRPM - fan.minRPM) * (clampedPct / 100.0))
-        let customProfile = FanProfile(
+        let custom = FanProfile(
             id: "custom_speed_\(Int(clampedPct))",
             name: "Custom (\(Int(clampedPct))%)",
             type: .custom,
@@ -147,14 +191,14 @@ public final class FanManager: ObservableObject, @unchecked Sendable {
             isManual: true,
             fixedRPM: rpm
         )
-        selectProfile(customProfile)
+        selectProfile(custom)
     }
 
     public func setCustomRPM(_ rpm: Float) {
         guard let fan = fans.first else { return }
         let clamped = max(fan.minRPM, min(rpm, fan.maxRPM))
         let pct = Int(((clamped - fan.minRPM) / (fan.maxRPM - fan.minRPM)) * 100.0)
-        let customProfile = FanProfile(
+        let custom = FanProfile(
             id: "custom_rpm_\(Int(clamped))",
             name: "Custom (\(pct)%)",
             type: .custom,
@@ -162,125 +206,99 @@ public final class FanManager: ObservableObject, @unchecked Sendable {
             isManual: true,
             fixedRPM: clamped
         )
-        selectProfile(customProfile)
+        selectProfile(custom)
     }
 
+    // MARK: - Multi-Fan Control Loop
     private func evaluateActiveProfile(force: Bool = false) {
-        guard let fan = fans.first else { return }
+        guard !fans.isEmpty else { return }
 
-        // Thermal Runaway Safety Watchdog:
-        // If peak diode temperature hits 86°C, immediately force 100% cooling to protect hardware
-        let peakTemp = SMCEngine.shared.getInstantPeakTemperature()
-        if peakTemp >= 86.0 && activeProfile.type != .system {
-            applyTargetRPM(fan.maxRPM, fanIndex: fan.id)
+        // Thermal Runaway Watchdog: If any diode hits 86°C, ramp 100% on ALL fans
+        if SMCEngine.shared.getInstantPeakTemperature() >= 86.0 && activeProfile.type != .system {
+            applyTargetRPMToAll(maxAllFans: true)
             return
         }
 
         switch activeProfile.type {
         case .system:
-            if fan.isManual || force {
-                _ = HelperClient.shared.resetToSystem(fanIndex: fan.id)
+            if fans.contains(where: { $0.isManual }) || force {
+                for fan in fans {
+                    _ = HelperClient.shared.resetToSystem(fanIndex: fan.id)
+                }
                 currentOutputRPM = nil
             }
 
         case .max:
-            applyTargetRPM(fan.maxRPM, fanIndex: fan.id)
+            applyTargetRPMToAll(maxAllFans: true)
 
         case .systemPlus, .coolChassis, .gaming, .silent, .custom:
             var desiredRPM: Float
             if let fixed = activeProfile.fixedRPM {
                 desiredRPM = fixed
             } else if let curve = activeProfile.curve {
+                let firstFan = fans[0]
                 desiredRPM = curve.calculateTargetRPM(
                     currentTemp: currentTemperature,
-                    hardwareMin: fan.minRPM,
-                    hardwareMax: fan.maxRPM
+                    hardwareMin: firstFan.minRPM,
+                    hardwareMax: firstFan.maxRPM
                 )
-            } else {
-                return
-            }
+            } else { return }
 
-            // Apply acoustic stabilization with slew-rate limiting and cooldown hold
-            let target = computeStabilizedRPM(desiredRPM: desiredRPM, currentActual: fan.actualRPM, force: force)
-            applyTargetRPM(target, fanIndex: fan.id)
+            let target = computeStabilizedRPM(desiredRPM: desiredRPM, currentActual: fans[0].actualRPM, force: force)
+            applyTargetRPMToAll(targetRPM: target)
         }
     }
 
-    /// Acoustic Stabilization Algorithm:
-    /// Clamps rate of change so fans never jerk or jump abruptly
     private func computeStabilizedRPM(desiredRPM: Float, currentActual: Float, force: Bool) -> Float {
         guard let current = currentOutputRPM, !force else {
             currentOutputRPM = desiredRPM
             return desiredRPM
         }
-
         let diff = desiredRPM - current
-
-        // Deadband: Ignore small jitter < 50 RPM
-        if abs(diff) < 50.0 {
-            return current
-        }
-
+        if abs(diff) < 50.0 { return current }
         let now = Date()
-
         if diff > 0 {
-            // Temperature is rising: ramp up smoothly
             cooldownUntil = now.addingTimeInterval(hysteresisHoldDuration)
-            let step = min(diff, maxRampUpPerTick)
-            let nextRPM = current + step
-            currentOutputRPM = nextRPM
-            return nextRPM
+            let next = current + min(diff, maxRampUpPerTick)
+            currentOutputRPM = next
+            return next
         } else {
-            // Temperature is falling: apply hysteresis cooldown delay
-            if now < cooldownUntil {
-                // Hold higher speed until cooldown expires
-                return current
-            }
-            // Ramp down gently like a whisper
-            let step = min(abs(diff), maxRampDownPerTick)
-            let nextRPM = current - step
-            currentOutputRPM = nextRPM
-            return nextRPM
+            if now < cooldownUntil { return current }
+            let next = current - min(abs(diff), maxRampDownPerTick)
+            currentOutputRPM = next
+            return next
         }
     }
 
-    private func applyTargetRPM(_ rpm: Float, fanIndex: Int) {
-        // Strict hardware bounds clamping
-        guard let fan = fans.first(where: { $0.id == fanIndex }) ?? fans.first else { return }
-        let clamped = max(fan.minRPM, min(rpm, fan.maxRPM))
-        _ = HelperClient.shared.setFanSpeed(fanIndex: fanIndex, targetRPM: clamped)
+    // Universal Multi-Fan Dispatch
+    private func applyTargetRPMToAll(targetRPM: Float = 0, maxAllFans: Bool = false) {
+        for fan in fans {
+            let rpm = maxAllFans ? fan.maxRPM : max(fan.minRPM, min(targetRPM, fan.maxRPM))
+            _ = HelperClient.shared.setFanSpeed(fanIndex: fan.id, targetRPM: rpm)
+        }
     }
 
     private func checkTimerExpiry() {
         guard let expiry = expiryDate else { return }
-        let remaining = expiry.timeIntervalSinceNow
-        if remaining <= 0 {
+        let rem = expiry.timeIntervalSinceNow
+        if rem <= 0 {
             selectDuration(.indefinitely)
-            if let sys = profiles.first(where: { $0.type == .system }) {
-                selectProfile(sys)
-            }
+            if let sys = profiles.first(where: { $0.type == .system }) { selectProfile(sys) }
         } else {
-            let mins = Int(remaining) / 60
-            let secs = Int(remaining) % 60
-            timerRemainingText = String(format: "%02d:%02d", mins, secs)
+            timerRemainingText = String(format: "%02d:%02d", Int(rem)/60, Int(rem)%60)
         }
     }
 
     private func updateTimerStatus() {
         if let expiry = expiryDate {
-            let remaining = expiry.timeIntervalSinceNow
-            if remaining > 0 {
-                let mins = Int(remaining) / 60
-                let secs = Int(remaining) % 60
-                timerRemainingText = String(format: "%02d:%02d", mins, secs)
-            }
+            let rem = expiry.timeIntervalSinceNow
+            if rem > 0 { timerRemainingText = String(format: "%02d:%02d", Int(rem)/60, Int(rem)%60) }
         }
     }
 
     public func shutdown() {
         monitorTimer?.invalidate()
         durationTimer?.invalidate()
-        // Safe exit: Hand control back to macOS firmware
         for fan in fans {
             _ = HelperClient.shared.resetToSystem(fanIndex: fan.id)
         }

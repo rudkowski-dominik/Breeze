@@ -29,6 +29,7 @@ swiftc -O -framework Cocoa -framework SwiftUI -framework IOKit \
     -o "$ROOT_DIR/Breeze" \
     "$ROOT_DIR/Sources/Breeze/SMC/SMCEngine.swift" \
     "$ROOT_DIR/Sources/Breeze/Models/FanProfile.swift" \
+    "$ROOT_DIR/Sources/Breeze/Services/LocalizationManager.swift" \
     "$ROOT_DIR/Sources/Breeze/Services/HelperClient.swift" \
     "$ROOT_DIR/Sources/Breeze/Services/FanManager.swift" \
     "$ROOT_DIR/Sources/Breeze/UI/GaugeMenuItemView.swift" \

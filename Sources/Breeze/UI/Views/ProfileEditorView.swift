@@ -41,7 +41,7 @@ public struct ProfileEditorView: View {
                             }) {
                                 HStack {
                                     VStack(alignment: .leading, spacing: 2) {
-                                        Text(profile.name)
+                                        Text(profile.localizedName)
                                             .font(.system(size: 13, weight: .medium))
                                             .foregroundColor(isSelected ? .white : .primary)
                                         Text(profile.type.rawValue)
@@ -82,7 +82,7 @@ public struct ProfileEditorView: View {
                 if let profile = manager.profiles.first(where: { $0.id == viewModel.selectedProfileId }) {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
-                            Text(profile.name)
+                            Text(profile.localizedName)
                                 .font(.system(size: 20, weight: .bold))
                             Spacer()
                             Button("Activate Profile") {
@@ -91,7 +91,7 @@ public struct ProfileEditorView: View {
                             .buttonStyle(.borderedProminent)
                         }
 
-                        Text(profile.subtitle)
+                        Text(profile.localizedSubtitle)
                             .font(.system(size: 13))
                             .foregroundColor(.secondary)
                     }

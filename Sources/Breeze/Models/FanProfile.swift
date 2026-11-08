@@ -9,31 +9,38 @@ public enum ProfileType: String, Codable, CaseIterable, Sendable {
     case silent = "Silent"
     case custom = "Custom"
 
-    public var bestForDescription: String {
+    public var localizedName: String {
+        let loc = LocalizationManager.shared
         switch self {
-        case .system:
-            return "Lets macOS manage the fans."
-        case .max:
-            return "Runs each fan at its maximum."
-        case .systemPlus:
-            return "Gentle, earlier airflow for everyday use."
-        case .coolChassis:
-            return "Keeps the typing area cool and comfortable."
-        case .gaming:
-            return "Very early and stronger cooling during sustained loads."
-        case .silent:
-            return "Keeps the fans slower for quiet environments."
-        case .custom:
-            return "Create your own cooling curves and temperature targets."
+        case .system: return loc.text(.profileSystem)
+        case .max: return loc.text(.profileMax)
+        case .systemPlus: return loc.text(.profileSystemPlus)
+        case .coolChassis: return loc.text(.profileCoolChassis)
+        case .gaming: return loc.text(.profileGaming)
+        case .silent: return loc.text(.profileSilent)
+        case .custom: return loc.text(.profileCustom)
+        }
+    }
+
+    public var bestForDescription: String {
+        let loc = LocalizationManager.shared
+        switch self {
+        case .system: return loc.text(.profileSystemDesc)
+        case .max: return loc.text(.profileMaxDesc)
+        case .systemPlus: return loc.text(.profileSystemPlusDesc)
+        case .coolChassis: return loc.text(.profileCoolChassisDesc)
+        case .gaming: return loc.text(.profileGamingDesc)
+        case .silent: return loc.text(.profileSilentDesc)
+        case .custom: return loc.text(.profileCustomDesc)
         }
     }
 }
 
 public struct CoolingCurve: Codable, Equatable, Sendable {
-    public var startTemp: Float      // Temperature where fan begins ramping above floor (°C)
-    public var maxTemp: Float        // Temperature where fan hits curve max RPM (°C)
-    public var baseRPM: Float        // Baseline idle RPM floor
-    public var maxRPM: Float         // Target peak RPM
+    public var startTemp: Float
+    public var maxTemp: Float
+    public var baseRPM: Float
+    public var maxRPM: Float
 
     public init(startTemp: Float, maxTemp: Float, baseRPM: Float, maxRPM: Float) {
         self.startTemp = startTemp
@@ -52,7 +59,6 @@ public struct CoolingCurve: Codable, Equatable, Sendable {
             return effMax
         } else {
             let progress = (currentTemp - startTemp) / max(1.0, (maxTemp - startTemp))
-            // Smooth S-curve (cubic hermite interpolation) to avoid sharp acoustic inflection points
             let smoothed = progress * progress * (3.0 - 2.0 * progress)
             return effBase + smoothed * (effMax - effBase)
         }
@@ -67,6 +73,14 @@ public struct FanProfile: Identifiable, Codable, Equatable, Sendable {
     public var isManual: Bool
     public var fixedRPM: Float?
     public var curve: CoolingCurve?
+
+    public var localizedName: String {
+        return type == .custom ? name : type.localizedName
+    }
+
+    public var localizedSubtitle: String {
+        return type == .custom ? subtitle : type.bestForDescription
+    }
 
     public init(
         id: String = UUID().uuidString,
@@ -112,7 +126,7 @@ public struct FanProfile: Identifiable, Codable, Equatable, Sendable {
                 curve: CoolingCurve(
                     startTemp: 58.0,
                     maxTemp: 84.0,
-                    baseRPM: 1700.0, // Quiet gentle airflow, inaudible on Mac mini
+                    baseRPM: 1700.0,
                     maxRPM: 3400.0
                 )
             ),
@@ -156,5 +170,19 @@ public struct FanProfile: Identifiable, Codable, Equatable, Sendable {
                 )
             )
         ]
+    }
+}
+
+extension TimerDuration {
+    public var localizedTitle: String {
+        let loc = LocalizationManager.shared
+        switch self {
+        case .indefinitely: return loc.text(.indefinitely)
+        case .for15Mins: return loc.text(.for15Mins)
+        case .for30Mins: return loc.text(.for30Mins)
+        case .for1Hour: return loc.text(.for1Hour)
+        case .for2Hours: return loc.text(.for2Hours)
+        case .untilQuit: return loc.text(.untilQuit)
+        }
     }
 }

@@ -1,4 +1,71 @@
 import SwiftUI
+import AppKit
+
+public enum IconThemeChoice: String, CaseIterable, Identifiable, Sendable {
+    case automatic = "auto"
+    case dark = "dark"
+    case light = "light"
+
+    public var id: String { rawValue }
+}
+
+public final class SettingsViewModel: ObservableObject {
+    @Published public var selectedTab: SettingsTab = .profiles
+    @Published public var isInstallingHelper: Bool = false
+    @Published public var installMessage: String? = nil
+    @Published public var launchAtLogin: Bool = true
+
+    @Published public var selectedLanguage: AppLanguage = LocalizationManager.shared.currentLanguage {
+        didSet {
+            LocalizationManager.shared.currentLanguage = selectedLanguage
+            MenuBarController.shared.buildMenu()
+        }
+    }
+
+    @Published public var selectedIconTheme: IconThemeChoice = .automatic {
+        didSet {
+            UserDefaults.standard.set(selectedIconTheme.rawValue, forKey: "breeze_icon_theme")
+            applyIconTheme()
+        }
+    }
+
+    @Published public var selectedMenuStyle: MenuBarDisplayStyle = MenuBarController.shared.displayStyle {
+        didSet {
+            MenuBarController.shared.displayStyle = selectedMenuStyle
+        }
+    }
+
+    public init(initialTab: SettingsTab = .profiles) {
+        self.selectedTab = initialTab
+
+        if let savedTheme = UserDefaults.standard.string(forKey: "breeze_icon_theme"),
+           let theme = IconThemeChoice(rawValue: savedTheme) {
+            self.selectedIconTheme = theme
+        }
+        applyIconTheme()
+    }
+
+    public func applyIconTheme() {
+        let isDark: Bool
+        switch selectedIconTheme {
+        case .automatic:
+            isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        case .dark:
+            isDark = true
+        case .light:
+            isDark = false
+        }
+
+        let iconName = isDark ? "AppIcon-Dark.png" : "AppIcon-Light.png"
+        let resourcePath = Bundle.main.bundlePath + "/Contents/Resources/" + iconName
+        let fallbackPath = "/Users/dominik/.gemini/antigravity/scratch/Breeze/assets/" + iconName
+
+        let path = FileManager.default.fileExists(atPath: resourcePath) ? resourcePath : fallbackPath
+        if let iconImage = NSImage(contentsOfFile: path) {
+            NSApplication.shared.applicationIconImage = iconImage
+        }
+    }
+}
 
 public enum SettingsTab: String, CaseIterable, Identifiable {
     case profiles = "Profiles"
@@ -7,6 +74,15 @@ public enum SettingsTab: String, CaseIterable, Identifiable {
     case general = "General"
 
     public var id: String { rawValue }
+
+    public func localizedTitle(loc: LocalizationManager) -> String {
+        switch self {
+        case .profiles: return loc.text(.tabProfiles)
+        case .sensors: return loc.text(.tabSensors)
+        case .helper: return loc.text(.tabHelper)
+        case .general: return loc.text(.tabGeneral)
+        }
+    }
 
     public var icon: String {
         switch self {
@@ -18,22 +94,10 @@ public enum SettingsTab: String, CaseIterable, Identifiable {
     }
 }
 
-public final class SettingsViewModel: ObservableObject {
-    @Published public var selectedTab: SettingsTab = .profiles
-    @Published public var isInstallingHelper: Bool = false
-    @Published public var installMessage: String? = nil
-    @Published public var launchAtLogin: Bool = true
-    @Published public var showRPMInMenuBar: Bool = false
-    @Published public var showTempInMenuBar: Bool = false
-
-    public init(initialTab: SettingsTab = .profiles) {
-        self.selectedTab = initialTab
-    }
-}
-
 public struct SettingsView: View {
     @ObservedObject var manager = FanManager.shared
     @ObservedObject var viewModel: SettingsViewModel
+    @ObservedObject var loc = LocalizationManager.shared
 
     public init(viewModel: SettingsViewModel = SettingsViewModel()) {
         self.viewModel = viewModel
@@ -41,13 +105,13 @@ public struct SettingsView: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            // Apple-style tab bar header
+            // Segmented Header
             Picker("", selection: Binding(
                 get: { viewModel.selectedTab },
                 set: { viewModel.selectedTab = $0 }
             )) {
                 ForEach(SettingsTab.allCases) { tab in
-                    Label(tab.rawValue, systemImage: tab.icon).tag(tab)
+                    Label(tab.localizedTitle(loc: loc), systemImage: tab.icon).tag(tab)
                 }
             }
             .pickerStyle(.segmented)
@@ -57,7 +121,7 @@ public struct SettingsView: View {
 
             Divider()
 
-            // Tab Content
+            // Content
             Group {
                 switch viewModel.selectedTab {
                 case .profiles:
@@ -71,24 +135,21 @@ public struct SettingsView: View {
                 }
             }
         }
-        .frame(width: 620, height: 440)
+        .frame(width: 630, height: 460)
     }
 
-    // Hardware Sensors Tab
     private var sensorsTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                // Header hardware info
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Mac mini (Apple M5 Pro)")
+                    Text("Apple Silicon (\(manager.fans.count) \(manager.fans.count > 1 ? "Fans" : "Fan"))")
                         .font(.system(size: 16, weight: .bold))
-                    Text("Real-time telemetry polled via AppleSMC and IOKit hardware clients.")
+                    Text("Real-time telemetry via AppleSMC and IOKit hardware clients.")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
                 }
 
-                // Fan Telemetry Box
-                GroupBox(label: Label("Cooling Fans", systemImage: "fanblades")) {
+                GroupBox(label: Label("Cooling Fans (\(manager.fans.count))", systemImage: "fanblades")) {
                     ForEach(manager.fans) { fan in
                         VStack(alignment: .leading, spacing: 6) {
                             HStack {
@@ -113,7 +174,6 @@ public struct SettingsView: View {
                     }
                 }
 
-                // Temperatures Box
                 GroupBox(label: Label("Thermal Diode Matrix", systemImage: "thermometer.medium")) {
                     VStack(spacing: 8) {
                         ForEach(manager.sensorReadings) { sensor in
@@ -139,7 +199,6 @@ public struct SettingsView: View {
         }
     }
 
-    // Privileged Helper Tool Tab
     private var helperTab: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 12) {
@@ -148,9 +207,9 @@ public struct SettingsView: View {
                     .foregroundColor(manager.isHelperActive ? .green : .orange)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(manager.isHelperActive ? "Privileged Helper Daemon is Active" : "Helper Daemon Not Installed / Inactive")
+                    Text(manager.isHelperActive ? loc.text(.helperActive) : loc.text(.helperInactive))
                         .font(.system(size: 15, weight: .bold))
-                    Text(manager.isHelperActive ? "Low-level SMC fan speed override is fully operational." : "Apple Silicon requires root privileges to modify fan SMC keys.")
+                    Text("Low-level Apple Silicon SMC fan control via /var/run/breeze.sock")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
                 }
@@ -158,10 +217,10 @@ public struct SettingsView: View {
 
             Divider()
 
-            Text("How Apple Silicon Fan Control Works")
+            Text("Universal Multi-Fan & Watchdog Safety")
                 .font(.system(size: 13, weight: .semibold))
 
-            Text("On Apple Silicon (M1, M2, M3, M4, M5), macOS restricts writing to SMC fan control registers (F0Tg, F0md) to root (UID 0). Reading fan speeds and temperatures does not require privileges.\n\nBreeze uses a lightweight background helper daemon (`com.breeze.helper`) communicating through a local Unix domain socket. Once installed, you will never be prompted for your password again when changing fan profiles.")
+            Text("Breeze includes a background launchd helper daemon (`com.breeze.helper`). It manages all system fans (MacBook Pro dual fans, Mac mini, Mac Studio). A 30-second hardware watchdog automatically restores macOS native firmware control if the user application disconnects or crashes.")
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
                 .lineSpacing(3)
@@ -181,7 +240,7 @@ public struct SettingsView: View {
                         ProgressView()
                             .scaleEffect(0.7)
                     } else {
-                        Text(manager.isHelperActive ? "Reinstall Helper Daemon" : "Install Privileged Helper...")
+                        Text(manager.isHelperActive ? loc.text(.helperReinstallBtn) : loc.text(.helperInstallBtn))
                     }
                 }
                 .buttonStyle(.borderedProminent)
@@ -191,37 +250,76 @@ public struct SettingsView: View {
         .padding(24)
     }
 
-    // General Settings Tab
     private var generalTab: some View {
-        Form {
-            Section(header: Text("Appearance").font(.headline)) {
-                Toggle("Launch at Login", isOn: Binding(
-                    get: { viewModel.launchAtLogin },
-                    set: { viewModel.launchAtLogin = $0 }
-                ))
-                Toggle("Show Live RPM in Menu Bar", isOn: Binding(
-                    get: { viewModel.showRPMInMenuBar },
-                    set: { viewModel.showRPMInMenuBar = $0 }
-                ))
-                Toggle("Show SoC Temperature in Menu Bar", isOn: Binding(
-                    get: { viewModel.showTempInMenuBar },
-                    set: { viewModel.showTempInMenuBar = $0 }
-                ))
-            }
-
-            Section(header: Text("Safety & Thermal Governance").font(.headline)) {
-                HStack {
-                    Text("Emergency Failsafe Threshold:")
-                    Spacer()
-                    Text("88.0 °C")
-                        .foregroundColor(.secondary)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                // 1. Language Selection (EN, PL, ES)
+                GroupBox(label: Label(loc.text(.language), systemImage: "globe")) {
+                    Picker("", selection: Binding(
+                        get: { viewModel.selectedLanguage },
+                        set: { viewModel.selectedLanguage = $0 }
+                    )) {
+                        ForEach(AppLanguage.allCases) { lang in
+                            Text(lang.displayName).tag(lang)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.vertical, 4)
                 }
-                Text("If the SoC temperature exceeds 88°C, Breeze will automatically override any active profile and ramp fans to maximum.")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
+
+                // 2. App Icon Theme Selector (Automatic, Dark Glass, Frosted White)
+                GroupBox(label: Label(loc.text(.iconTheme), systemImage: "app.badge")) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Picker("", selection: Binding(
+                            get: { viewModel.selectedIconTheme },
+                            set: { viewModel.selectedIconTheme = $0 }
+                        )) {
+                            Text(loc.text(.iconThemeAuto)).tag(IconThemeChoice.automatic)
+                            Text(loc.text(.iconThemeDark)).tag(IconThemeChoice.dark)
+                            Text(loc.text(.iconThemeLight)).tag(IconThemeChoice.light)
+                        }
+                        .pickerStyle(.radioGroup)
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                // 3. Menu Bar Display Style Selector
+                GroupBox(label: Label(loc.text(.menuBarStyle), systemImage: "menubar.rectangle")) {
+                    Picker("", selection: Binding(
+                        get: { viewModel.selectedMenuStyle },
+                        set: { viewModel.selectedMenuStyle = $0 }
+                    )) {
+                        Text(loc.text(.menuBarIconOnly)).tag(MenuBarDisplayStyle.iconOnly)
+                        Text(loc.text(.menuBarIconTemp)).tag(MenuBarDisplayStyle.iconAndTemp)
+                        Text(loc.text(.menuBarIconRPM)).tag(MenuBarDisplayStyle.iconAndRPM)
+                    }
+                    .pickerStyle(.radioGroup)
+                    .padding(.vertical, 4)
+                }
+
+                // 4. Energy Optimization & Safety
+                GroupBox(label: Label(loc.text(.energyOptimization), systemImage: "leaf")) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(loc.text(.energyDesc))
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        Divider()
+                        HStack {
+                            Text(loc.text(.failsafeThreshold))
+                            Spacer()
+                            Text("86.0 °C")
+                                .fontWeight(.semibold)
+                                .foregroundColor(.red)
+                        }
+                        Text(loc.text(.failsafeDesc))
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.vertical, 4)
+                }
             }
+            .padding(20)
         }
-        .padding(24)
     }
 
     private func installHelper() {
@@ -238,7 +336,7 @@ public struct SettingsView: View {
                 viewModel.installMessage = "Helper daemon installed successfully!"
                 manager.checkHelperStatus()
             } else {
-                viewModel.installMessage = "Installation failed or was cancelled. You can also run the install script in Terminal."
+                viewModel.installMessage = "Installation failed or was cancelled."
             }
         }
     }
