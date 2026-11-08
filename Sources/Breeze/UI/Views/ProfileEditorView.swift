@@ -171,6 +171,7 @@ public struct ProfileEditorView: View {
                 createCustomProfileSheet
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var createCustomProfileSheet: some View {

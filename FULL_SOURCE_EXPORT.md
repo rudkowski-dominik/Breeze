@@ -1304,102 +1304,202 @@ public enum LocalizedKey {
 ## Plik: `Sources/Breeze/UI/GaugeMenuItemView.swift`
 ```swift
 import AppKit
-import SwiftUI
 
-public struct FanGaugeSwiftUIView: View {
-    @ObservedObject var manager = FanManager.shared
-    @ObservedObject var loc = LocalizationManager.shared
+public final class ControlCenterSlider: NSControl {
+    public var percentage: Float = 0.0 {
+        didSet {
+            let clamped = max(0, min(100, percentage))
+            if clamped != oldValue {
+                needsDisplay = true
+            }
+        }
+    }
 
-    public init() {}
+    public var isDragging: Bool = false
+    public var onValueChanged: ((Float) -> Void)?
 
-    public var body: some View {
-        let fan = manager.fans.first
+    public override var isFlipped: Bool { true }
+
+    public override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+    }
+
+    public override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+
+        let cornerRadius: CGFloat = bounds.height / 2.0
+        let trackPath = NSBezierPath(roundedRect: bounds, xRadius: cornerRadius, yRadius: cornerRadius)
+        NSColor.secondaryLabelColor.withAlphaComponent(0.25).setFill()
+        trackPath.fill()
+
+        let fillWidth = max(0, min(bounds.width * CGFloat(percentage / 100.0), bounds.width))
+        if fillWidth > 0 {
+            let fillRect = NSRect(x: 0, y: 0, width: fillWidth, height: bounds.height)
+            let fillPath = NSBezierPath(roundedRect: fillRect, xRadius: cornerRadius, yRadius: cornerRadius)
+
+            ctx.saveGState()
+            fillPath.addClip()
+            let gradient = NSGradient(
+                starting: NSColor.systemCyan.withAlphaComponent(0.85),
+                ending: NSColor.systemBlue.withAlphaComponent(0.95)
+            )
+            gradient?.draw(in: fillRect, angle: 0)
+            ctx.restoreGState()
+        }
+
+        // Apple fan icon inside track
+        if let fanIcon = NSImage(systemSymbolName: "fan", accessibilityDescription: nil) {
+            let config = NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold)
+            let configured = fanIcon.withSymbolConfiguration(config)
+            let iconRect = NSRect(x: 5, y: (bounds.height - 12) / 2.0, width: 12, height: 12)
+            configured?.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: fillWidth > 18 ? 1.0 : 0.45)
+        }
+    }
+
+    public override func mouseDown(with event: NSEvent) {
+        isDragging = true
+        updateFromEvent(event)
+
+        while isDragging {
+            guard let nextEvent = window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) else { break }
+            if nextEvent.type == .leftMouseUp {
+                isDragging = false
+                updateFromEvent(nextEvent)
+                break
+            } else {
+                updateFromEvent(nextEvent)
+            }
+        }
+    }
+
+    private func updateFromEvent(_ event: NSEvent) {
+        let loc = convert(event.locationInWindow, from: nil)
+        let newPct = Float(max(0, min(100, (loc.x / bounds.width) * 100.0)))
+        percentage = newPct
+        onValueChanged?(newPct)
+    }
+}
+
+public final class FanControlView: NSView {
+    public override var isFlipped: Bool { true }
+
+    public let slider = ControlCenterSlider(frame: NSRect(x: 38, y: 12, width: 184, height: 18))
+    private let minusButton = NSButton(frame: NSRect(x: 12, y: 11, width: 20, height: 20))
+    private let plusButton = NSButton(frame: NSRect(x: 228, y: 11, width: 20, height: 20))
+    public let valueLabel = NSTextField(labelWithString: "0% · 1000 RPM")
+    public let statusLabel = NSTextField(labelWithString: "System Managed · macOS Thermal Governance")
+
+    public override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupUI()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupUI()
+    }
+
+    private func setupUI() {
+        wantsLayer = true
+
+        // Stepper Minus button
+        minusButton.bezelStyle = .circular
+        minusButton.isBordered = false
+        minusButton.image = NSImage(systemSymbolName: "minus.circle.fill", accessibilityDescription: "Decrease Fan Speed")
+        minusButton.contentTintColor = .secondaryLabelColor
+        minusButton.target = self
+        minusButton.action = #selector(didClickMinus)
+        addSubview(minusButton)
+
+        // Stepper Plus button
+        plusButton.bezelStyle = .circular
+        plusButton.isBordered = false
+        plusButton.image = NSImage(systemSymbolName: "plus.circle.fill", accessibilityDescription: "Increase Fan Speed")
+        plusButton.contentTintColor = .secondaryLabelColor
+        plusButton.target = self
+        plusButton.action = #selector(didClickPlus)
+        addSubview(plusButton)
+
+        // Slider
+        slider.onValueChanged = { [weak self] newPct in
+            FanManager.shared.setCustomFixedSpeed(percentage: newPct)
+            self?.updateLabelsOnly(pct: newPct)
+        }
+        addSubview(slider)
+
+        // Value & RPM Readout
+        valueLabel.frame = NSRect(x: 10, y: 37, width: 240, height: 18)
+        valueLabel.alignment = .center
+        valueLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .bold)
+        valueLabel.textColor = .labelColor
+        addSubview(valueLabel)
+
+        // Status description
+        statusLabel.frame = NSRect(x: 8, y: 57, width: 244, height: 16)
+        statusLabel.alignment = .center
+        statusLabel.font = NSFont.systemFont(ofSize: 10.5, weight: .regular)
+        statusLabel.textColor = .secondaryLabelColor
+        addSubview(statusLabel)
+
+        update()
+    }
+
+    @objc private func didClickMinus() {
+        let newPct = max(0, slider.percentage - 5)
+        slider.percentage = newPct
+        FanManager.shared.setCustomFixedSpeed(percentage: newPct)
+        updateLabelsOnly(pct: newPct)
+    }
+
+    @objc private func didClickPlus() {
+        let newPct = min(100, slider.percentage + 5)
+        slider.percentage = newPct
+        FanManager.shared.setCustomFixedSpeed(percentage: newPct)
+        updateLabelsOnly(pct: newPct)
+    }
+
+    private func updateLabelsOnly(pct: Float) {
+        let hardwareMin: Float = 1000.0
+        let hardwareMax: Float = 4900.0
+        let targetRPM = hardwareMin + (pct / 100.0) * (hardwareMax - hardwareMin)
+        let fanCountSuffix = FanManager.shared.fans.count > 1 ? " (\(FanManager.shared.fans.count) Fans)" : ""
+        valueLabel.stringValue = "\(Int(round(pct)))% · \(Int(round(targetRPM))) RPM\(fanCountSuffix)"
+        statusLabel.stringValue = LocalizationManager.shared.text(.profileCustomDesc)
+    }
+
+    public func update() {
+        guard !slider.isDragging else { return }
+        let fan = FanManager.shared.fans.first
         let pct = fan?.percentage ?? 0
         let rpm = fan?.actualRPM ?? 0
 
-        VStack(spacing: 9) {
-            // Sleek horizontal progress bar
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 3.5, style: .continuous)
-                        .fill(Color.secondary.opacity(0.25))
-
-                    RoundedRectangle(cornerRadius: 3.5, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [
-                                    Color.cyan.opacity(0.85),
-                                    Color.blue.opacity(0.95)
-                                ],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .frame(width: max(0, min(geo.size.width * CGFloat(pct / 100.0), geo.size.width)))
-                }
-            }
-            .frame(height: 5)
-            .padding(.horizontal, 22)
-
-            // Fan Speed & RPM readout
-            HStack(spacing: 6) {
-                Text("\(Int(round(pct)))% · \(Int(round(rpm))) RPM")
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundColor(.primary)
-
-                if manager.fans.count > 1 {
-                    Text("(\(manager.fans.count) Fans)")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(.secondary)
-                }
-            }
-
-            // Interactive Apple Control Center Style Slider
-            HStack(spacing: 10) {
-                Image(systemName: "fan")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
-
-                Slider(value: Binding(
-                    get: { Double(pct) },
-                    set: { newVal in
-                        manager.setCustomFixedSpeed(percentage: Float(newVal))
-                    }
-                ), in: 0...100)
-                .controlSize(.small)
-
-                Image(systemName: "fan.fill")
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-            }
-            .padding(.horizontal, 18)
-
-            // Status message
-            Text(manager.statusMessage)
-                .font(.system(size: 11, weight: .regular))
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .lineLimit(2)
-                .padding(.horizontal, 14)
-        }
-        .padding(.vertical, 8)
-        .frame(width: 260)
+        slider.percentage = pct
+        let fanCountSuffix = FanManager.shared.fans.count > 1 ? " (\(FanManager.shared.fans.count) Fans)" : ""
+        valueLabel.stringValue = "\(Int(round(pct)))% · \(Int(round(rpm))) RPM\(fanCountSuffix)"
+        statusLabel.stringValue = FanManager.shared.statusMessage
     }
 }
 
 public final class GaugeMenuItem: NSMenuItem {
-    private let hostingView: NSHostingView<FanGaugeSwiftUIView>
+    public let controlView: FanControlView
 
     public init() {
-        let swiftUIView = FanGaugeSwiftUIView()
-        self.hostingView = NSHostingView(rootView: swiftUIView)
+        self.controlView = FanControlView(frame: NSRect(x: 0, y: 0, width: 260, height: 86))
         super.init(title: "", action: nil, keyEquivalent: "")
-        self.hostingView.frame = NSRect(x: 0, y: 0, width: 260, height: 102)
-        self.view = hostingView
+        self.view = controlView
     }
 
     required init(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    public func updateTelemetry() {
+        controlView.update()
     }
 }
 ```
@@ -1603,6 +1703,8 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     public func updateMenuState() {
         guard let menu = menu else { return }
 
+        gaugeMenuItem?.updateTelemetry()
+
         for item in menu.items {
             if let profile = item.representedObject as? FanProfile {
                 item.state = (FanManager.shared.activeProfile.id == profile.id) ? .on : .off
@@ -1620,6 +1722,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     public func menuWillOpen(_ menu: NSMenu) {
         FanManager.shared.updateTelemetry()
         FanManager.shared.checkHelperStatus()
+        gaugeMenuItem?.updateTelemetry()
         updateMenuState()
     }
 
@@ -1704,7 +1807,7 @@ public final class SettingsWindowController: NSObject, NSWindowDelegate {
         }
 
         let newWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 440),
+            contentRect: NSRect(x: 0, y: 0, width: 660, height: 480),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -1903,6 +2006,7 @@ public struct ProfileEditorView: View {
                 createCustomProfileSheet
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var createCustomProfileSheet: some View {
@@ -2128,7 +2232,7 @@ public struct SettingsView: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            // Segmented Header
+            // Segmented Header - rigidly locked at the top
             Picker("", selection: Binding(
                 get: { viewModel.selectedTab },
                 set: { viewModel.selectedTab = $0 }
@@ -2139,13 +2243,13 @@ public struct SettingsView: View {
             }
             .pickerStyle(.segmented)
             .padding(.horizontal, 24)
-            .padding(.top, 16)
+            .padding(.top, 14)
             .padding(.bottom, 12)
 
             Divider()
 
-            // Content
-            Group {
+            // Content Container - fills exact remaining frame from top-left
+            ZStack(alignment: .topLeading) {
                 switch viewModel.selectedTab {
                 case .profiles:
                     ProfileEditorView()
@@ -2157,13 +2261,14 @@ public struct SettingsView: View {
                     generalTab
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .frame(width: 630, height: 460)
+        .frame(width: 660, height: 480, alignment: .top)
     }
 
     private var sensorsTab: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 18) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Apple Silicon (\(manager.fans.count) \(manager.fans.count > 1 ? "Fans" : "Fan"))")
                         .font(.system(size: 16, weight: .bold))
@@ -2218,20 +2323,21 @@ public struct SettingsView: View {
                     .padding(.vertical, 4)
                 }
             }
-            .padding(20)
+            .padding(24)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var helperTab: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 14) {
                 Image(systemName: manager.isHelperActive ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
-                    .font(.system(size: 36))
+                    .font(.system(size: 38))
                     .foregroundColor(manager.isHelperActive ? .green : .orange)
 
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text(manager.isHelperActive ? loc.text(.helperActive) : loc.text(.helperInactive))
-                        .font(.system(size: 15, weight: .bold))
+                        .font(.system(size: 16, weight: .bold))
                     Text("Low-level Apple Silicon SMC fan control via /var/run/breeze.sock")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
@@ -2240,13 +2346,15 @@ public struct SettingsView: View {
 
             Divider()
 
-            Text("Universal Multi-Fan & Watchdog Safety")
-                .font(.system(size: 13, weight: .semibold))
-
-            Text("Breeze includes a background launchd helper daemon (`com.breeze.helper`). It manages all system fans (MacBook Pro dual fans, Mac mini, Mac Studio). A 30-second hardware watchdog automatically restores macOS native firmware control if the user application disconnects or crashes.")
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-                .lineSpacing(3)
+            GroupBox(label: Label("Universal Multi-Fan & Watchdog Safety", systemImage: "shield.lefthalf.filled")) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Breeze includes a background launchd helper daemon (`com.breeze.helper`). It manages all system fans (MacBook Pro dual fans, Mac mini, Mac Studio). A 30-second hardware watchdog automatically restores macOS native firmware control if the user application disconnects or crashes.")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                        .lineSpacing(3)
+                        .padding(.vertical, 4)
+                }
+            }
 
             Spacer()
 
@@ -2271,11 +2379,12 @@ public struct SettingsView: View {
             }
         }
         .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var generalTab: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 18) {
                 // 1. Language Selection (EN, PL, ES)
                 GroupBox(label: Label(loc.text(.language), systemImage: "globe")) {
                     Picker("", selection: Binding(
@@ -2287,7 +2396,7 @@ public struct SettingsView: View {
                         }
                     }
                     .pickerStyle(.segmented)
-                    .padding(.vertical, 4)
+                    .padding(.vertical, 6)
                 }
 
                 // 2. App Icon Theme Selector (Automatic, Dark Glass, Frosted White)
@@ -2341,8 +2450,9 @@ public struct SettingsView: View {
                     .padding(.vertical, 4)
                 }
             }
-            .padding(20)
+            .padding(24)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func installHelper() {

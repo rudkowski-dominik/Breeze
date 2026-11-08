@@ -194,6 +194,8 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     public func updateMenuState() {
         guard let menu = menu else { return }
 
+        gaugeMenuItem?.updateTelemetry()
+
         for item in menu.items {
             if let profile = item.representedObject as? FanProfile {
                 item.state = (FanManager.shared.activeProfile.id == profile.id) ? .on : .off
@@ -211,6 +213,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     public func menuWillOpen(_ menu: NSMenu) {
         FanManager.shared.updateTelemetry()
         FanManager.shared.checkHelperStatus()
+        gaugeMenuItem?.updateTelemetry()
         updateMenuState()
     }
 

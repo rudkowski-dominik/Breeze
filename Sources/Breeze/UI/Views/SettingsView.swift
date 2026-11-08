@@ -105,7 +105,7 @@ public struct SettingsView: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            // Segmented Header
+            // Segmented Header - rigidly locked at the top
             Picker("", selection: Binding(
                 get: { viewModel.selectedTab },
                 set: { viewModel.selectedTab = $0 }
@@ -116,13 +116,13 @@ public struct SettingsView: View {
             }
             .pickerStyle(.segmented)
             .padding(.horizontal, 24)
-            .padding(.top, 16)
+            .padding(.top, 14)
             .padding(.bottom, 12)
 
             Divider()
 
-            // Content
-            Group {
+            // Content Container - fills exact remaining frame from top-left
+            ZStack(alignment: .topLeading) {
                 switch viewModel.selectedTab {
                 case .profiles:
                     ProfileEditorView()
@@ -134,13 +134,14 @@ public struct SettingsView: View {
                     generalTab
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .frame(width: 630, height: 460)
+        .frame(width: 660, height: 480, alignment: .top)
     }
 
     private var sensorsTab: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 18) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Apple Silicon (\(manager.fans.count) \(manager.fans.count > 1 ? "Fans" : "Fan"))")
                         .font(.system(size: 16, weight: .bold))
@@ -195,20 +196,21 @@ public struct SettingsView: View {
                     .padding(.vertical, 4)
                 }
             }
-            .padding(20)
+            .padding(24)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var helperTab: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 14) {
                 Image(systemName: manager.isHelperActive ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
-                    .font(.system(size: 36))
+                    .font(.system(size: 38))
                     .foregroundColor(manager.isHelperActive ? .green : .orange)
 
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text(manager.isHelperActive ? loc.text(.helperActive) : loc.text(.helperInactive))
-                        .font(.system(size: 15, weight: .bold))
+                        .font(.system(size: 16, weight: .bold))
                     Text("Low-level Apple Silicon SMC fan control via /var/run/breeze.sock")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
@@ -217,13 +219,15 @@ public struct SettingsView: View {
 
             Divider()
 
-            Text("Universal Multi-Fan & Watchdog Safety")
-                .font(.system(size: 13, weight: .semibold))
-
-            Text("Breeze includes a background launchd helper daemon (`com.breeze.helper`). It manages all system fans (MacBook Pro dual fans, Mac mini, Mac Studio). A 30-second hardware watchdog automatically restores macOS native firmware control if the user application disconnects or crashes.")
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-                .lineSpacing(3)
+            GroupBox(label: Label("Universal Multi-Fan & Watchdog Safety", systemImage: "shield.lefthalf.filled")) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Breeze includes a background launchd helper daemon (`com.breeze.helper`). It manages all system fans (MacBook Pro dual fans, Mac mini, Mac Studio). A 30-second hardware watchdog automatically restores macOS native firmware control if the user application disconnects or crashes.")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                        .lineSpacing(3)
+                        .padding(.vertical, 4)
+                }
+            }
 
             Spacer()
 
@@ -248,11 +252,12 @@ public struct SettingsView: View {
             }
         }
         .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var generalTab: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 18) {
                 // 1. Language Selection (EN, PL, ES)
                 GroupBox(label: Label(loc.text(.language), systemImage: "globe")) {
                     Picker("", selection: Binding(
@@ -264,7 +269,7 @@ public struct SettingsView: View {
                         }
                     }
                     .pickerStyle(.segmented)
-                    .padding(.vertical, 4)
+                    .padding(.vertical, 6)
                 }
 
                 // 2. App Icon Theme Selector (Automatic, Dark Glass, Frosted White)
@@ -318,8 +323,9 @@ public struct SettingsView: View {
                     .padding(.vertical, 4)
                 }
             }
-            .padding(20)
+            .padding(24)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func installHelper() {
