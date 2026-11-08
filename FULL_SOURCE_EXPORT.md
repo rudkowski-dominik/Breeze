@@ -2401,6 +2401,23 @@ echo "Socket: /var/run/breeze.sock"
 ```
 
 ---
+## Skrypt: `scripts/check_dark_png.swift`
+```bash
+import AppKit
+
+let path = "/Users/dominik/.gemini/antigravity/scratch/Breeze/assets/AppIcon-Dark.png"
+let img = NSImage(contentsOfFile: path)!
+let rep = NSBitmapImageRep(data: img.tiffRepresentation!)!
+
+print("Image size: \(rep.pixelsWide)x\(rep.pixelsHigh)")
+// Sample from edge to center along diagonal (x=y)
+for i in stride(from: 50, to: 512, by: 40) {
+    let c = rep.colorAt(x: i, y: i)!
+    print("Diagonal at (\(i),\(i)): R=\(String(format: "%.2f", c.redComponent)) G=\(String(format: "%.2f", c.greenComponent)) B=\(String(format: "%.2f", c.blueComponent)) A=\(String(format: "%.2f", c.alphaComponent))")
+}
+```
+
+---
 ## Skrypt: `scripts/generate_icon.swift`
 ```bash
 import AppKit
@@ -2609,6 +2626,24 @@ print("Generated all icon sizes in \(iconsetPath)")
 ```
 
 ---
+## Skrypt: `scripts/inspect_user_screenshot.swift`
+```bash
+import AppKit
+
+let path = "/Users/dominik/.gemini/antigravity/brain/279c540e-fa02-4786-ba13-c3af16ead743/.user_uploaded/media_1794167361793_52a81a44.png"
+let img = NSImage(contentsOfFile: path)!
+let rep = NSBitmapImageRep(data: img.tiffRepresentation!)!
+
+print("Screenshot dimensions: \(rep.pixelsWide)x\(rep.pixelsHigh)")
+
+// Let's find where the white card is
+for y in stride(from: 150, to: 350, by: 20) {
+    let c = rep.colorAt(x: 120, y: y)!
+    print("x=120, y=\(y): R=\(String(format: "%.2f", c.redComponent)) G=\(String(format: "%.2f", c.greenComponent)) B=\(String(format: "%.2f", c.blueComponent))")
+}
+```
+
+---
 ## Skrypt: `scripts/process_user_icons.swift`
 ```bash
 import AppKit
@@ -2623,96 +2658,62 @@ guard let sourceImage = NSImage(contentsOfFile: inputPath),
     exit(1)
 }
 
-func cropAndClean(centerX: CGFloat, centerY: CGFloat, size: CGFloat, isDark: Bool) -> CGImage {
-    let cropRect = CGRect(x: centerX - size/2, y: centerY - size/2, width: size, height: size)
-    let croppedCg = cgImage.cropping(to: cropRect)!
-    
-    let w = croppedCg.width
-    let h = croppedCg.height
+func renderNativeAppleSquircleIcon(centerX: CGFloat, centerY: CGFloat, sourceSize: CGFloat, targetCanvasSize: CGFloat = 1024.0) -> NSImage {
+    // 1. Crop exactly the icon content from source
+    let srcRect = CGRect(x: centerX - sourceSize/2, y: centerY - sourceSize/2, width: sourceSize, height: sourceSize)
+    let croppedCg = cgImage.cropping(to: srcRect)!
+
+    // 2. Apple HIG standard icon proportions:
+    // Canvas is 1024x1024, squircle is ~834x834 pt, corner radius is 0.2237 * width (~186.5 pt)
+    let squircleSize: CGFloat = 834.0
+    let cornerRadius: CGFloat = squircleSize * 0.2237
+    let squircleOrigin = CGPoint(
+        x: (targetCanvasSize - squircleSize) / 2.0,
+        y: (targetCanvasSize - squircleSize) / 2.0 + 8.0 // standard +8pt optical centering for drop shadow
+    )
+    let squircleRect = CGRect(origin: squircleOrigin, size: CGSize(width: squircleSize, height: squircleSize))
+
     let colorSpace = CGColorSpaceCreateDeviceRGB()
     let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
-    guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: colorSpace, bitmapInfo: bitmapInfo) else {
-        return croppedCg
-    }
-    
-    ctx.draw(croppedCg, in: CGRect(x: 0, y: 0, width: w, height: h))
-    guard let pixelBuffer = ctx.data else { return croppedCg }
-    let ptr = pixelBuffer.bindMemory(to: UInt8.self, capacity: w * h * 4)
-    
-    let center = CGPoint(x: CGFloat(w)/2.0, y: CGFloat(h)/2.0)
-    let squircleR: CGFloat = size * 0.415
-    
-    for y in 0..<h {
-        for x in 0..<w {
-            let offset = (y * w + x) * 4
-            let r = Float(ptr[offset]) / 255.0
-            let g = Float(ptr[offset + 1]) / 255.0
-            let b = Float(ptr[offset + 2]) / 255.0
-            
-            let dx = abs(CGFloat(x) - center.x)
-            let dy = abs(CGFloat(y) - center.y)
-            let dist = max(dx, dy)
-            
-            // Only process outside / shadow boundary
-            if dist > squircleR - 18 {
-                let minC = min(r, min(g, b))
-                if minC > 0.985 {
-                    // Pure white background -> transparent
-                    ptr[offset + 3] = 0
-                    ptr[offset] = 0
-                    ptr[offset + 1] = 0
-                    ptr[offset + 2] = 0
-                } else if minC > 0.85 {
-                    // Outer shadow feathering
-                    let alpha = max(0.0, min(1.0, (1.0 - minC) * 3.2))
-                    let newA = UInt8(alpha * 255.0)
-                    ptr[offset + 3] = newA
-                    if isDark {
-                        ptr[offset] = UInt8(Float(ptr[offset]) * 0.12 * alpha)
-                        ptr[offset + 1] = UInt8(Float(ptr[offset + 1]) * 0.18 * alpha)
-                        ptr[offset + 2] = UInt8(Float(ptr[offset + 2]) * 0.35 * alpha)
-                    } else {
-                        ptr[offset] = UInt8(Float(ptr[offset]) * 0.20 * alpha)
-                        ptr[offset + 1] = UInt8(Float(ptr[offset + 1]) * 0.25 * alpha)
-                        ptr[offset + 2] = UInt8(Float(ptr[offset + 2]) * 0.40 * alpha)
-                    }
-                }
-            }
-        }
-    }
-    
-    return ctx.makeImage() ?? croppedCg
-}
+    let ctx = CGContext(data: nil, width: Int(targetCanvasSize), height: Int(targetCanvasSize), bitsPerComponent: 8, bytesPerRow: Int(targetCanvasSize) * 4, space: colorSpace, bitmapInfo: bitmapInfo)!
 
-func renderCanvas(cgImage: CGImage, targetSize: CGFloat) -> NSImage {
-    let outImg = NSImage(size: NSSize(width: targetSize, height: targetSize))
-    outImg.lockFocus()
-    guard let ctx = NSGraphicsContext.current?.cgContext else {
-        outImg.unlockFocus()
-        return outImg
-    }
+    // 3. Render authentic macOS icon drop shadow
+    ctx.saveGState()
+    ctx.setShadow(offset: CGSize(width: 0, height: -18), blur: 24, color: NSColor.black.withAlphaComponent(0.32).cgColor)
+    let squirclePath = CGPath(roundedRect: squircleRect, cornerWidth: cornerRadius, cornerHeight: cornerRadius, transform: nil)
+    ctx.addPath(squirclePath)
+    ctx.setFillColor(NSColor.black.cgColor)
+    ctx.fillPath()
+    ctx.restoreGState()
+
+    // 4. Clip to continuous Apple squircle path to completely eliminate outer background white artifacts
+    ctx.saveGState()
+    ctx.addPath(squirclePath)
+    ctx.clip()
+
+    // 5. Draw the user's high-res icon perfectly centered into the squircle
     ctx.interpolationQuality = .high
-    
-    // Scale squircle to occupy ~82% of macOS app icon canvas (Apple standard icon grid)
-    let iconSize = targetSize * 0.84
-    let origin = (targetSize - iconSize) / 2.0
-    let targetRect = CGRect(x: origin, y: origin, width: iconSize, height: iconSize)
-    
-    ctx.draw(cgImage, in: targetRect)
-    outImg.unlockFocus()
-    return outImg
-}
+    ctx.draw(croppedCg, in: squircleRect)
 
-let lightCg = cropAndClean(centerX: 280.5, centerY: 265, size: 480, isDark: false)
-let darkCg = cropAndClean(centerX: 751.0, centerY: 265, size: 480, isDark: true)
+    // 6. Subtle inner rim stroke for enhanced glass depth
+    ctx.setLineWidth(1.5)
+    ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.25).cgColor)
+    ctx.addPath(squirclePath)
+    ctx.strokePath()
+
+    ctx.restoreGState()
+
+    let resultCg = ctx.makeImage()!
+    return NSImage(cgImage: resultCg, size: NSSize(width: targetCanvasSize, height: targetCanvasSize))
+}
 
 let rootDir = "/Users/dominik/.gemini/antigravity/scratch/Breeze"
 let assetsDir = "\(rootDir)/assets"
 try? FileManager.default.createDirectory(atPath: assetsDir, withIntermediateDirectories: true)
 
-// Save high-resolution PNGs
-let light1024 = renderCanvas(cgImage: lightCg, targetSize: 1024)
-let dark1024 = renderCanvas(cgImage: darkCg, targetSize: 1024)
+// Render Light and Dark icons with exact Apple HIG squircle geometry
+let light1024 = renderNativeAppleSquircleIcon(centerX: 280.5, centerY: 264.5, sourceSize: 406.0)
+let dark1024 = renderNativeAppleSquircleIcon(centerX: 751.0, centerY: 265.5, sourceSize: 406.0)
 
 func savePNG(image: NSImage, path: String) {
     if let tiff = image.tiffRepresentation,
@@ -2726,7 +2727,7 @@ savePNG(image: light1024, path: "\(assetsDir)/AppIcon-Light.png")
 savePNG(image: dark1024, path: "\(assetsDir)/AppIcon-Dark.png")
 savePNG(image: dark1024, path: "\(rootDir)/AppIcon_preview.png")
 
-// Create iconset for icns generation
+// Generate standard Apple iconsets
 func generateIconset(image: NSImage, iconsetName: String) {
     let fm = FileManager.default
     let iconsetPath = "\(rootDir)/\(iconsetName).iconset"
@@ -2760,6 +2761,6 @@ generateIconset(image: dark1024, iconsetName: "AppIcon-Dark")
 generateIconset(image: light1024, iconsetName: "AppIcon-Light")
 generateIconset(image: dark1024, iconsetName: "AppIcon")
 
-print("Generated iconsets for Dark, Light, and default AppIcon.")
+print("Generated pixel-perfect native macOS squircle iconsets!")
 ```
 
